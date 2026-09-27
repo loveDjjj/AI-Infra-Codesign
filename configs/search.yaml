@@ -1,0 +1,16 @@
+{
+  "base": "configs/trials/joint28.yaml",
+  "workers": 1,
+  "max_candidates": 8,
+  "variables": {
+    "hardware.cache_mib": [
+      0,
+      1
+    ],
+    "programs.M1_P1.config.gemm_m_tile": [
+      16,
+      32
+    ]
+  },
+  "warning": "Only implemented generator parameters; full scoring is explicit."
+}

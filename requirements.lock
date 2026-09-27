@@ -1,0 +1,2 @@
+numpy==2.5.3
+# 参考环境为 Python 3.12.13；配置采用 JSON 兼容的 YAML。

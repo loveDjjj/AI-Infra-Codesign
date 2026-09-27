@@ -1,0 +1,7 @@
+{
+  "official_root": "vendor/official",
+  "python": "/hbt_share/hbt/ryt_workspace/AI_Infra/.venv/bin/python",
+  "workload": "v0.7",
+  "release": "v0.7.2",
+  "baseline_sha256": "7f188ab3eebb283031ab0d8dd6b7f2f0187e8d94ca48086a1c78e5a6f75def7b"
+}

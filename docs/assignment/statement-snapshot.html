@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Transformer hardware and program co-design assignment: workload, design space, assembly rules, scoring, and resources">
+  <title>Assignment Statement · Agent-Guided Transformer Co-design</title>
+  <link rel="stylesheet" href="/assets/transformer.css">
+</head>
+<body>
+  <header class="topbar"><div class="shell topbar-inner"><div class="assignment-heading"><h1>Agent-Guided Transformer Co-design</h1></div>
+    <nav class="section-tabs" aria-label="Assignment sections">
+      <a href="/">Background</a>
+      <a href="/statement/" aria-current="page">Statement</a>
+      <a href="/#submit">Submit</a>
+      <a href="/#submissions">Submissions &amp; lookup</a>
+      <a href="/#leaderboard">Leaderboard</a>
+    </nav></div></header><div class="milestone-bar"><div class="shell milestone-list">
+      <div class="milestone"><strong>Milestone 1 · Oct 7, 2026, 12:00 (Beijing time)</strong><span>第一阶段 · 2026年10月7日中午12:00（北京时间）</span><p>Submissions received by then will inform selection of collaboration proposals before the college project application deadline on Oct 10. / 届时收到的提交将用于遴选合作提议，以便在10月10日学院立项截止前推进。</p></div>
+      <div class="milestone"><strong>Milestone 2 · Oct 12, 2026, 12:00 (Beijing time)</strong><span>第二阶段 · 2026年10月12日中午12:00（北京时间）</span><p>Final homework submission deadline. / 作业最终提交截止时间。</p></div>
+    </div></div>
+  <main class="shell">
+    <section class="section">
+      <div class="section-heading"><p class="eyebrow">02 / ASSIGNMENT</p><h2>Assignment statement</h2><p>Exact workload, design space, assembly rules, scoring, and submission format.</p><details class="resource-menu"><summary>Browse all resources</summary><div class="resource-list"><div><strong>Guides</strong><ul><li><a href="/">Background</a></li><li><a href="/statement/">Assignment statement</a></li><li><a href="/isa/">Complete ISA</a></li><li><a href="/abi/">HBM ABI</a></li><li><a href="/assembly-guide/">Assembly walkthrough</a></li></ul></div><div><strong>Examples and starter</strong><ul><li><a href="/examples/M1_P1.asm">Complete P1 assembly</a></li><li><a href="/examples/M2_D1.asm">Complete D1 assembly</a></li><li><a href="/examples/hardware.json">Example hardware</a></li><li><a href="/downloads/transformer-codesign-starter.zip">Starter ZIP</a></li></ul></div><div><strong>Public model source</strong><ul><li><a href="/model/hardware.py">hardware.py</a></li><li><a href="/model/cost_v04.json">cost_v04.json</a></li><li><a href="/model/micro.py">micro.py</a></li><li><a href="/model/service.py">service.py</a></li><li><a href="/model/pipeline_events.py">pipeline_events.py</a></li><li><a href="/model/cache.py">cache.py</a></li><li><a href="/model/timed_cache.py">timed_cache.py</a></li><li><a href="/model/power.py">power.py</a></li></ul></div></div></details></div>
+      <article class="panel statement-content"><h2 id="1-the-challenge">1. The challenge</h2>
+<p>Submit <strong>one accelerator configuration and two programs</strong>. The same hardware must run both scenarios: prompt prefill plus its first new position, and a sequence of decode positions. Your goal is to produce correct hidden states and KV updates while improving the combined simulated score. You may change hardware choices, tiling, data movement, workgroup placement, scheduling, fusion, recomputation, attention implementation, and the assembly text.</p>
+<p>This is a single-chip, FP32, decoder-only Transformer inference problem. In each layer, an incoming hidden state passes through affine LayerNorm, a QKV projection, dense causal attention, an output projection and residual, a second LayerNorm, then <code>w1 + b1</code>, tanh-approximate GELU, <code>w2 + b2</code>, and a second residual. Q, K, and V are split into heads; each layer writes its newly computed K/V. The final layer writes the hidden state. There is no training, token sampling, vocabulary projection, MoE, quantization, or cross-chip communication. The <a href="#4-resources-and-development-workflow">public reference implementation</a> defines the precise computation.</p>
+<h3 id="workload-supplied-to-your-programs">Workload supplied to your programs</h3>
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Both scenarios</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Models</td>
+<td>P1: three layers, width 256, eight heads of width 32, FFN width 1024 (about 2.37M parameters). D1: two layers, width 128, four heads of width 32, FFN width 512 (about 0.40M parameters). There is no vocabulary embedding or output head.</td>
+</tr>
+<tr>
+<td>Data</td>
+<td>FP32 weights, activations, and KV; LayerNorm epsilon <code>1e-5</code></td>
+</tr>
+<tr>
+<td>Attention</td>
+<td>Dense causal self-attention with scores scaled by <code>1/sqrt(32)</code></td>
+</tr>
+<tr>
+<td>Output check</td>
+<td>Final hidden states and every layer's new K/V, with <code>abs(candidate - reference) &lt;= 1e-3 + 1e-3 * abs(reference)</code>; nonfinite values fail</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="case-requirements">Case requirements</h3>
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>What is ready at the start</th>
+<th>What your program must do</th>
+<th>Step boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>M1_P1</code></td>
+<td>Batch 2, with a 64-position prompt for each batch element</td>
+<td>Compute both prompts and their K/V through three layers; then compute the first new position for each, attending to its own prompt and itself</td>
+<td>Write <strong>both</strong> prompts' outputs/KV and issue <code>STEP.COMMIT {"step":0}</code> <strong>before</strong> reading either <code>input/step0</code> vector. Then write both 65th outputs and KV.</td>
+</tr>
+<tr>
+<td><code>M2_D1</code></td>
+<td>Batch 1, per-layer K/V for a 128-position history already in HBM</td>
+<td>Compute eight consecutive new positions through the smaller two-layer model; step <code>s</code> attends to 128 historical plus <code>s+1</code> generated positions</td>
+<td>Write step <code>s</code>'s output/KV and issue <code>STEP.COMMIT {"step":s}</code> for every <code>s=0..7</code>. Later external inputs are released only after earlier commits.</td>
+</tr>
+</tbody>
+</table></div>
+<p>The new inputs are teacher-forced hidden-state vectors. You do not choose a vocabulary token. Preparing D1's 128-position history is outside its timed interval. The official numerical values are hidden, while shapes, addresses, and scoring rules are public.</p>
+<h3 id="independent-agent-work">Independent agent work</h3>
+<p>Use <strong>your own AI agent</strong> to design the hardware, produce the assembly, run experiments, and decide what to submit. Complete this work independently. Do not ask another person or another participant's agent for solutions, hints, code, designs, or feedback, and do not study or reuse their submissions or agent traces. The official starter package, this site's references, and publicly documented tools are allowed. Every submission must include your own project and agent history to show how the result was reached.</p>
+<p>How you search is your choice. Mixed-integer linear programming (MILP) is one possible way to model a bounded set of hardware and software decisions; <strong>an MILP model is not required</strong>. You may instead use an agent-guided search, heuristics, a compiler optimization loop, or a combination. The judge evaluates the submitted hardware and assembly, not the method used to find them.</p>
+<h2 id="2-hardware-menu-and-design-space">2. Hardware menu and design space</h2>
+<h3 id="the-machine-these-choices-describe">The machine these choices describe</h3>
+<p>This is a <strong>GPU-inspired teaching accelerator at a coarse architectural level</strong>. One chip has identical streaming multiprocessors (SMs), a shared network-on-chip (NoC), high-bandwidth memory (HBM) channels, and an optional chip-wide cache. Each SM has tensor-core-like matrix units (TCs), vector lanes, special-function units (SFUs), zero to two dedicated reduction units, a fixed 256 KiB register file (RF), optional shared memory (SH), and direct-memory-access (DMA) engines for transfers. The chip has 2 GiB of addressable HBM. This model specifies the resources a program can use and the contention that affects its simulated time; it does not define CUDA threads, warps, a production GPU memory hierarchy, or a silicon implementation.</p>
+<p>Your assembly creates workgroups with <code>WG.BEGIN</code> and names the destination SM explicitly. At most four workgroups can reside on one SM at a time. Each workgroup has a private 64 KiB RF slot and reserves its own SH quota from that SM. <code>LD</code> and <code>ST</code> move values among HBM, RF, and SH; <code>MMA.ACC</code>, <code>VEC</code>, <code>REDUCE</code>, and <code>SFU</code> compute from RF operands. RF <code>lane</code> numbers identify storage partitions, not GPU threads. A larger <code>sm_count</code> therefore helps only when your program places useful work on more SMs. The <a href="/isa/">assembly reference</a> defines these program-visible rules.</p>
+<p><code>hardware.json</code> must include <code>"version": "challenge-hardware-v0.4"</code> and all required menu fields. The <a href="/examples/hardware.json">baseline hardware JSON</a> is a legal starting point. Units below are per SM unless a row says chip-wide.</p>
+<p class="mobile-table-note">Swipe across the table to read each field's explanation.</p>
+
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Legal choices</th>
+<th>Meaning in this model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>version</code></td>
+<td><code>challenge-hardware-v0.4</code></td>
+<td>Hardware format identifier; required, not a performance choice.</td>
+</tr>
+<tr>
+<td><code>sm_count</code></td>
+<td>4, 8, 12, 16, 20, 24, 28, 32</td>
+<td>Number of available SMs. More SMs cost area; programs must assign workgroups to use them.</td>
+</tr>
+<tr>
+<td><code>tc_count</code></td>
+<td>0, 1, 2, 3, 4, 6, 8</td>
+<td>Matrix engines per SM for <code>MMA.ACC</code>; zero makes that opcode unavailable.</td>
+</tr>
+<tr>
+<td><code>tc_array</code> when TC &gt; 0</td>
+<td><code>4x8</code>, <code>8x8</code>, <code>8x16</code></td>
+<td>Matrix engine's M-by-N array shape; changes throughput, tail utilization, and area.</td>
+</tr>
+<tr>
+<td><code>tc_k_parallel</code> when TC &gt; 0</td>
+<td>1, 2, 4</td>
+<td>Parallelism along a matrix product's K reduction; changes cost and FP32 summation order.</td>
+</tr>
+<tr>
+<td><code>vector_lanes</code></td>
+<td>8, 16, 32, 64</td>
+<td>Parallel lanes for <code>VEC</code>; also partitions each workgroup's fixed RF slot into this many lanes.</td>
+</tr>
+<tr>
+<td><code>sfu_lanes</code></td>
+<td>Any integer from 1 through <code>vector_lanes</code></td>
+<td>Lanes for <code>SFU</code> operations such as <code>exp</code>, <code>tanh</code>, and <code>rsqrt</code>.</td>
+</tr>
+<tr>
+<td><code>reduction_units</code></td>
+<td>0, 1, 2</td>
+<td>Dedicated capacity for <code>REDUCE</code>; with zero, reductions use the vector path.</td>
+</tr>
+<tr>
+<td><code>rf_ports</code></td>
+<td><code>2R1W</code>, <code>4R2W</code>, <code>8R4W</code></td>
+<td>Abstract RF read/write bandwidth; higher port counts cost more area and energy.</td>
+</tr>
+<tr>
+<td><code>shared_kib</code></td>
+<td>0, 32, 64, 96, 128, 192, 256</td>
+<td>SH capacity per SM that resident workgroups may reserve; zero disables SH use.</td>
+</tr>
+<tr>
+<td><code>shared_banks</code> when shared &gt; 0</td>
+<td>1, 2, 4, 8</td>
+<td>Number of independently serviced SH banks; accesses to one bank can contend.</td>
+</tr>
+<tr>
+<td><code>shared_ports</code> when shared &gt; 0</td>
+<td><code>1R1W</code>, <code>2R1W</code></td>
+<td>Per-bank SH read/write service mode; more read bandwidth costs area.</td>
+</tr>
+<tr>
+<td><code>dma_depth</code></td>
+<td>0, 1, 2</td>
+<td>Outstanding transfer slots per DMA engine; zero makes transfers block later issue by that workgroup.</td>
+</tr>
+<tr>
+<td><code>dma_engines</code></td>
+<td>1, 2, 4</td>
+<td>Transfer engines per SM for <code>LD</code> and <code>ST</code>; more engines can serve transfers concurrently.</td>
+</tr>
+<tr>
+<td><code>sm_noc_bytes_per_cycle</code></td>
+<td>32, 64, 128</td>
+<td>Byte capacity of each SM's links into and out of the NoC.</td>
+</tr>
+<tr>
+<td><code>multicast</code></td>
+<td><code>false</code>, <code>true</code></td>
+<td>Allows a concurrent HBM/cache line read to serve multiple destinations in the timing model.</td>
+</tr>
+<tr>
+<td><code>noc_bytes_per_cycle</code></td>
+<td>64, 128, 256, 512</td>
+<td>Chip-wide NoC byte capacity shared by SM traffic.</td>
+</tr>
+<tr>
+<td><code>hbm_channels</code></td>
+<td>1, 2, 4, 8</td>
+<td>Number of parallel HBM service channels; addresses are distributed across them.</td>
+</tr>
+<tr>
+<td><code>cache_mib</code></td>
+<td>0, 1, 2, 4, 8, 16</td>
+<td>Capacity of the automatic chip-wide cache for HBM reads; zero bypasses it.</td>
+</tr>
+</tbody>
+</table></div>
+<p>When <code>tc_count</code> is zero, <strong>omit</strong> <code>tc_array</code> and <code>tc_k_parallel</code>. When <code>shared_kib</code> is zero, <strong>omit</strong> <code>shared_banks</code> and <code>shared_ports</code>. The Cache is automatic shared hardware, with no assembly cache-control instruction. <code>multicast</code> is a JSON boolean.</p>
+<h3 id="where-the-architectural-rules-live">Where the architectural rules live</h3>
+<p>The starter ZIP includes the full public implementation. Use the <a href="/model/hardware.py">hardware menu and area formula</a> and <a href="/model/cost_v04.json">area, energy, clock, and budget coefficients</a> for configuration costs. <a href="/model/micro.py">Functional instruction execution</a> defines FP32 results and legal RF/SH/HBM accesses; the <a href="/isa/">ISA reference</a> explains that behavior in student-facing form. <a href="/model/service.py">Compute service formulas</a> and <a href="/model/pipeline_events.py">timed resource scheduling</a> model issue, compute units, RF/SH ports, DMA, NoC, HBM contention, and transfers. <a href="/model/cache.py">Cache tags and traffic</a>, <a href="/model/timed_cache.py">timed cache service</a>, and <a href="/model/power.py">peak-power calculation</a> complete the public cost path. The <a href="/abi/">HBM ABI</a> lists every workload symbol and address.</p>
+<p>Functional correctness is checked by an FP32 instruction executor; timing is estimated by a deterministic resource scheduler. The area and energy coefficients are teaching estimates at a fixed 500 MHz clock, with no RTL synthesis or silicon measurement. Treat the resource behavior defined here as the machine for this assignment; familiar GPU design rules remain hypotheses to test against it.</p>
+<p>The menu has about <strong>120.7 billion raw hardware combinations</strong>, even before choosing a program. Many fail area, power, or latency limits, and some may behave similarly; the count alone does not prove the search is hard. Evaluating all hardware/program pairs by brute force is not a useful strategy. Hardware value also depends on software: more Tensor Cores need suitable tiles and data supply, while a Cache or shared-memory allocation helps only when the access pattern actually reuses data. Familiar GPU rules are useful hypotheses, but this machine has its own RF, memory, power, and cost model. Measure candidates in this simulator rather than assuming a GPU-derived choice wins here.</p>
+<p>We deliberately restrict the model family, data type, hardware menu, and ISA. The challenge still includes enough interacting choices to require joint reasoning without asking you to design an unrestricted chip or compiler.</p>
+<h2 id="3-what-to-submit">3. What to submit</h2>
+<p>Create one ZIP with these paths <strong>at its root</strong>. There is one submission type: each upload is graded, and your <strong>highest eligible server score</strong> under the same student ID appears on the leaderboard and counts as your final grade.</p>
+<p><strong>Milestone 1 / 第一阶段：October 7, 2026, 12:00 Beijing time / 2026年10月7日中午12:00（北京时间）。</strong> Submissions received by this time will inform the selection of collaboration proposals before the college project application deadline on October 10. / 届时收到的提交将用于遴选合作提议，以便在10月10日学院立项截止前推进。 You may continue improving and submitting your homework afterward. / 此后仍可继续改进并提交作业。</p>
+<p><strong>Milestone 2 / 第二阶段：October 12, 2026, 12:00 Beijing time / 2026年10月12日中午12:00（北京时间）。</strong> This is the final homework submission deadline; the server stops accepting new submissions then. Submissions received before the deadline may finish grading afterward. / 这是作业最终提交截止时间；届时服务器停止接收新提交。截止前收到的提交可在此后完成评分。</p>
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>Required path</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hardware.json</code></td>
+<td>One legal configuration shared by P1 and D1</td>
+</tr>
+<tr>
+<td><code>programs/M1_P1.asm</code></td>
+<td>Complete prefill plus first-new-position program</td>
+</tr>
+<tr>
+<td><code>programs/M2_D1.asm</code></td>
+<td>Complete eight-step decode program</td>
+</tr>
+<tr>
+<td><code>project/iteration-log.md</code></td>
+<td>Your chronological project record: candidate changes, local checks, scores or observations, rejected ideas, and the reason for this submission</td>
+</tr>
+<tr>
+<td><code>agent-trace/</code></td>
+<td>Export the complete trace of the agent sessions used for this project in their native format, such as Codex session JSON/JSONL; keep at least one nonempty trace file under this folder</td>
+</tr>
+</tbody>
+</table></div>
+<p>Keep the project files that produced your assembly, such as generator source, scripts, and experiment notes, under <code>project/</code> when you use them. Project records and agent traces are for <strong>manual review</strong>; the upload service does not automatically check whether they are present or complete. The grading service reads the three hardware/program files as data and does not execute submitted Python, shell scripts, or custom simulators. Each <code>.asm</code> source is limited to 8 MiB, 32 nested static loops, and 10 million instructions after expansion.</p>
+<h3 id="additional-submission-information">Additional submission information</h3>
+<ol>
+<li><strong>The submission system's score is authoritative.</strong> It runs the provided default scorer against the current published assembly ISA. You may change the software optimization strategy and compiler, but the emitted assembly must remain compatible with that scorer. The scorer may contain bugs; if you find one, contact the TA at <a href="mailto:yiding@slai.edu.cn">yiding@slai.edu.cn</a> or on WeChat.</li>
+<li><strong>Validate locally before uploading.</strong> Automatic grading usually takes <strong>10–30 minutes</strong> and may take longer when many submissions are queued. Do not use the submission system as your validation loop. The <strong>Submit</strong> tab accepts one ZIP of at most <strong>25 MiB</strong>, saves it, and returns a receipt ID and lookup key. Keep both; <strong>Submissions &amp; lookup</strong> shows progress and diagnostics. <strong>Upload frequency: one submission per student ID every 10 minutes.</strong> The server reports the remaining wait if you upload sooner. Please use the service considerately.</li>
+<li><strong>Use a consistent identity.</strong> Enter the same display name and your real student ID on every upload. Submissions are grouped by student ID for the leaderboard and final grade.</li>
+</ol>
+<h2 id="4-resources-and-development-workflow">4. Resources and development workflow</h2>
+<p>Download the <a href="/downloads/transformer-codesign-starter.zip">complete starter ZIP</a> and extract it into a working directory. It is a <strong>working baseline</strong>, not just an empty template. It includes:</p>
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>File or folder inside the ZIP</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hardware.json</code></td>
+<td>Legal baseline hardware; use it directly or change menu values</td>
+</tr>
+<tr>
+<td><code>programs/M1_P1.asm</code>, <code>programs/M2_D1.asm</code></td>
+<td>Complete assembly programs for both model and scenario pairs; the unchanged baseline scores 1000</td>
+</tr>
+<tr>
+<td><code>project/compiler.py</code></td>
+<td>Editable Python assembly generator with <code>Builder</code>, <code>generate_m1_p1()</code>, <code>generate_m1_d1()</code>, and a command to write both <code>.asm</code> files</td>
+</tr>
+<tr>
+<td><code>codesign/challenge/baseline.py</code></td>
+<td>Frozen reference version of the generator used to verify the baseline manifest; leave this copy unchanged</td>
+</tr>
+<tr>
+<td><code>challenge.py</code> and the other files in <code>codesign/challenge/</code></td>
+<td>Public parser, functional checker, performance model, workload definition, HBM layout, and reference implementation</td>
+</tr>
+<tr>
+<td><code>baseline_manifest.json</code></td>
+<td>Frozen baseline cycles, hashes, and runtime contract used by local experimental scoring</td>
+</tr>
+<tr>
+<td><code>BACKGROUND.md</code>, <code>README.md</code>, <code>ASSEMBLY_GUIDE.md</code>, <code>ISA.md</code>, <code>ABI.md</code></td>
+<td>The motivation, this statement, a guided map of the long programs, complete instruction rules, and every public HBM address</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Read these beside the code:</strong> <a href="/assembly-guide/">assembly walkthrough</a> · <a href="/isa/">complete ISA</a> · <a href="/abi/">HBM ABI</a> · <a href="/examples/M1_P1.asm">full P1 listing</a> · <a href="/examples/M2_D1.asm">full D1 listing</a>. P1 is about 401 KiB and D1 about 552 KiB because they spell out batch phases and decode steps; the walkthrough maps them by line range. Edit <code>project/compiler.py</code> and regenerate both files instead of hand-editing thousands of lines.</p>
+<h3 id="the-supplied-generator-and-your-own-compiler">The supplied generator and your own compiler</h3>
+<p>The supplied <code>project/compiler.py</code> is a <strong>small, editable Python compiler for this fixed workload</strong>, copied from the reference generator. Its Python source describes the baseline LayerNorm, projections, attention, FFN, storage, and loop structure. It uses the public model/scenario definition and HBM layout, then emits literal ISA text for the two <code>programs/*.asm</code> files. It does <strong>not</strong> take a C program, run on input tensor values, or automatically choose a schedule from <code>hardware.json</code>; the checker supplies tensor values later and evaluates the generated assembly with the hardware file you submit. From the extracted starter directory, run <code>python -m project.compiler</code> to write both assembly files.</p>
+<p>You may modify this generator or build a new one. A general-purpose programming language frontend is unnecessary: your generator only needs to produce legal assembly for the two fixed cases. It may implement your own software optimizations, including tile sizes and tail tiles, loop order, reuse in RF or shared memory, fusion, scratch allocation, workgroup placement, and synchronization. You may also add fast syntax, shape, resource, or dependency checks to reject bad candidates before the full public check. The published ISA and checker determine whether the emitted program is legal and correct. Keep the generator and any optimization scripts in <code>project/</code> for each submission; the grader executes only the emitted assembly.</p>
+<p><strong>Regenerate the unmodified baseline</strong> with <code>python -m project.compiler</code>. The <a href="/assembly-guide/#7-generate-check-and-submit">assembly guide §7: Generate, check, and submit</a> explains the compiler's inputs and outputs, its current tiling support, and the subsequent <code>check</code> and <code>estimate</code> commands.</p>
+<p>A productive iteration looks like this:</p>
+<ol>
+<li><strong>Reproduce the baseline.</strong> Keep the provided files intact for one local <code>check</code> and <code>grade</code> run; inspect the case results and resource diagnostics.</li>
+<li><strong>Change one idea at a time.</strong> Start from the baseline generator or your own generator. If you change hardware, keep one <code>hardware.json</code> for both programs. Regenerate the <code>.asm</code> files you actually intend to submit.</li>
+<li><strong>Check semantics before speed.</strong> Run <code>check</code> on public seed 7. <code>estimate</code> is faster for performance exploration but does not establish correctness. Run <code>grade</code> for a public experimental score after correctness passes.</li>
+<li><strong>Keep an iteration record.</strong> Update <code>project/iteration-log.md</code> as candidates are tested. Export your own agent session trace to <code>agent-trace/</code>; include both in every ZIP.</li>
+<li><strong>Package and upload.</strong> Put the required paths at the ZIP root, save the receipt, and look up the official hidden-input result. Public results help development; the leaderboard and final grade use your best eligible server result.</li>
+</ol>
+<p>Use <strong>Python 3.12.13</strong> and <strong>NumPy 2.5.3</strong> for frozen-baseline comparisons. From the extracted starter directory, use a fresh report filename for every run:</p>
+<pre><code class="language-sh">python challenge.py check --hardware hardware.json --program-p1 programs/M1_P1.asm --program-d1 programs/M2_D1.asm --seed 7 --report check-1.json
+python challenge.py estimate --hardware hardware.json --program-p1 programs/M1_P1.asm --program-d1 programs/M2_D1.asm --seed 7 --report estimate-1.json
+python challenge.py grade --hardware hardware.json --program-p1 programs/M1_P1.asm --program-d1 programs/M2_D1.asm --baseline baseline_manifest.json --seed 7 --report grade-1.json
+</code></pre>
+<p>The cost coefficients, including area and power, are in <code>codesign/challenge/cost_v04.json</code>; the performance model source is in the same folder. The public <code>grade</code> result is <strong>experimental</strong>. Official hidden values and full reports are held on the server.</p>
+<h2 id="5-assembly-and-storage-rules">5. Assembly and storage rules</h2>
+<p>An assembly line is an opcode followed by one JSON object, such as <code>STEP.COMMIT {"step":0}</code>. Whole-line <code>#</code> comments are allowed. The <a href="/isa/">complete ISA reference</a> gives every opcode, field, vector operation, static-loop expression, and synchronization rule. The <a href="/assembly-guide/">assembly walkthrough</a> explains how the long example builds LayerNorm, QKV, attention, FFN, and output writes from those primitives.</p>
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>Space</th>
+<th>What an address means</th>
+<th>Important rule</th>
+<th>Full reference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>HBM</td>
+<td><strong>FP32 element offset</strong>, not a byte address; the <a href="/abi/">ABI table</a> names each symbol, shape, offset, and release step</td>
+<td>Weights and historical KV are read-only; future inputs are unreadable; output hidden/KV must be written to their published regions</td>
+<td><a href="/abi/">HBM ABI</a></td>
+</tr>
+<tr>
+<td>RF</td>
+<td>Element offset within a workgroup's <code>lane</code> partition of its 64 KiB private slot</td>
+<td>Initialize before reading; compute instructions take RF operands; another workgroup cannot read this slot</td>
+<td><a href="/isa/#operand-format">ISA operand format</a></td>
+</tr>
+<tr>
+<td>SH</td>
+<td>Element offset within explicitly allocated workgroup shared memory</td>
+<td>Declare <code>shared_bytes</code> in <code>WG.BEGIN</code>; move SH values into RF before computing</td>
+<td><a href="/isa/#complete-opcode-list">ISA workgroup rules</a></td>
+</tr>
+</tbody>
+</table></div>
+<p>For a row-major HBM matrix of width <code>N</code>, element <code>(row, column)</code> is at <code>base + row*N + column</code>. A strided tile needs <code>shape</code>, <code>strides</code>, and <code>count</code>: for a 48×16 tile from P1's <code>[256,768]</code> QKV weight matrix, use <code>shape:[48,16]</code>, <code>strides:[768,1]</code>, and <code>count:768</code>. The <a href="/assembly-guide/#4-read-hbm-operands-as-element-addresses">walkthrough's address example</a> shows the full JSON view and K/V flattening formulas. A bare <code>count:768</code> reads consecutive elements and is a different tile.</p>
+<ul>
+<li><strong>Workgroups and compute.</strong> <code>WG.BEGIN</code>/<code>WG.END</code> define lifetime. <code>LD</code>/<code>ST</code> move data. <code>MMA.ACC</code>, <code>VEC</code>, <code>REDUCE</code>, and <code>SFU</code> operate on RF. <code>FOR</code>/<code>END.FOR</code> are bounded static loops. The <a href="/isa/#complete-opcode-list">ISA opcode table</a> lists exact fields.</li>
+<li><strong>Dependencies.</strong> <code>WAIT</code> and <code>BARRIER</code> order named events. Source-text interleaving of different workgroups does not order overlapping HBM reads/writes. An <code>ST</code> may still be reading its RF/SH source after issue; wait before overwriting that source. See <a href="/assembly-guide/#6-commit-event-and-workgroup-rules-that-often-cause-failures">synchronization pitfalls</a>.</li>
+<li><strong>Step release and coverage.</strong> In P1, commit both complete prompts before reading the first new input. In D1, commit each of the eight outputs before the next input is available. Every required final hidden and new K/V element must be written exactly once. See <a href="/assembly-guide/#2-locate-a-block-by-its-name">P1/D1 program maps</a>.</li>
+<li><strong>Numerics.</strong> Instructions round to FP32 at defined boundaries. Stable softmax matters when logits are large. The hidden checker compares every required hidden/KV value with the tolerance above; a plausible runtime trace cannot substitute for correct values.</li>
+</ul>
+<p>The fixed RF capacity, optional shared memory and Cache, and explicit movement rules make the hardware/software interaction measurable. You may use another valid program structure, including online softmax, as long as it follows this interface.</p>
+<h2 id="6-scoring-and-leaderboard">6. Scoring and leaderboard</h2>
+<p>The simulated clock is <strong>500 MHz</strong>. The frozen baseline takes <strong>30,996,995 cycles</strong> for P1 and <strong>1,302,032 cycles</strong> for D1. A submission is eligible only when both programs pass correctness, chip area is at most <strong>24 mm²</strong>, each case's maximum rolling <strong>1000-cycle average power</strong> is at most <strong>20 W</strong>, and each case takes no more than twice its own baseline cycles.</p>
+<p>For eligible submissions:</p>
+<p><code>score = 1000 × sqrt((30,996,995 / T_P1) × (1,302,032 / T_D1))</code></p>
+<p>The unchanged v0.7 baseline scores <strong>1000</strong>. Earlier v0.6 receipts remain available for lookup, while the current leaderboard includes only v0.7 submissions because scores from different workloads cannot be compared. There is no preset maximum. A failed check or budget gate produces diagnostics and no leaderboard score. The leaderboard keeps each participant's best eligible official score. Receipt lookup shows case cycles, throughput, power, area, and gate results. These are estimates in the frozen educational simulator, not measured silicon PPA.</p></article>
+    </section>
+  </main>
+  <footer><div class="shell">Agent-Guided Transformer Co-design</div></footer>
+</body>
+</html>

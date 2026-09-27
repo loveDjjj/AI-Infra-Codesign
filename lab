@@ -1,0 +1,5 @@
+#!/bin/sh
+LAB_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+LAB_PYTHON=${LAB_PYTHON:-/hbt_share/hbt/ryt_workspace/AI_Infra/.venv/bin/python}
+if [ ! -x "$LAB_PYTHON" ]; then LAB_PYTHON=python3.12; fi
+PYTHONPATH="$LAB_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec "$LAB_PYTHON" -m codesign_lab.cli "$@"

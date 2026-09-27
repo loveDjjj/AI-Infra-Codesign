@@ -1,0 +1,17 @@
+workspace/
+__pycache__/
+*.pyc
+*.egg-info/
+data/.experiments.lock
+.venv/
+
+# 本地保留压缩包，Git 不提交；不会删除文件。
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.7z
+*.rar
