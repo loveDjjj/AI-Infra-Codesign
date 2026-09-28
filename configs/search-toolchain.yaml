@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "python": "workspace/search-env/bin/python",
+  "requirements": "configs/search-requirements.lock",
+  "optuna_version": "4.3.0",
+  "numpy_version": "2.2.6",
+  "purpose": "仅搜索后端；官方评估仍使用configs/toolchain.yaml"
+}

@@ -1,0 +1,201 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "target_id": {
+      "type": "string"
+    },
+    "lane": {
+      "type": "string"
+    },
+    "hypothesis": {
+      "type": "string"
+    },
+    "base_record": {
+      "type": "string"
+    },
+    "source_epoch": {
+      "type": "string"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "M1_P1",
+          "M2_D1"
+        ]
+      }
+    },
+    "variables": {
+      "type": "object",
+      "properties": {
+        "programs.M1_P1.config.attention_query_tile": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              8,
+              16,
+              32
+            ]
+          }
+        },
+        "programs.M1_P1.config.attention_key_tile": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              32,
+              64
+            ]
+          }
+        },
+        "programs.M1_P1.config.attention_value_tile": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              32,
+              64
+            ]
+          }
+        },
+        "programs.M1_P1.config.w1_preload_k": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              16,
+              32,
+              64
+            ]
+          }
+        },
+        "programs.M1_P1.config.w2_preload_k": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              16,
+              32,
+              64
+            ]
+          }
+        },
+        "programs.M1_P1.config.gemm_m_tile": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              8,
+              16,
+              32
+            ]
+          }
+        },
+        "programs.M1_P1.config.gemm_k_tile": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              32,
+              64
+            ]
+          }
+        },
+        "programs.M1_P1.config.gemm_n_group": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ]
+          }
+        },
+        "programs.M1_P1.config.vector_tile": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              512,
+              1024
+            ]
+          }
+        },
+        "hardware.reduction_units": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ]
+          }
+        },
+        "hardware.cache_mib": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ]
+          }
+        },
+        "hardware.sfu_lanes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "enum": [
+              4,
+              8
+            ]
+          }
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "sampler": {
+      "type": "string",
+      "enum": [
+        "enumerate"
+      ]
+    },
+    "max_trials": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "priority": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "target_id",
+    "lane",
+    "hypothesis",
+    "base_record",
+    "source_epoch",
+    "cases",
+    "variables",
+    "sampler",
+    "max_trials",
+    "priority",
+    "evidence_ids"
+  ],
+  "additionalProperties": false
+}

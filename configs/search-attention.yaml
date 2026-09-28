@@ -1,0 +1,38 @@
+{
+  "base": "configs/trials/joint28.yaml",
+  "workers": 32,
+  "max_memory_fraction": 0.8,
+  "task_memory_mib": 1024,
+  "wall_budget_seconds": 3600,
+  "task_timeout_seconds": 1800,
+  "max_candidates": 24,
+  "functional_seeds": [
+    7,
+    123
+  ],
+  "cache": true,
+  "cases": [
+    "M1_P1",
+    "M2_D1"
+  ],
+  "variables": {
+    "programs.M1_P1.config.attention_query_tile": [
+      32,
+      16,
+      8
+    ],
+    "programs.M1_P1.config.attention_key_tile": [
+      64,
+      32
+    ],
+    "programs.M1_P1.config.attention_value_tile": [
+      64,
+      32
+    ],
+    "hardware.reduction_units": [
+      1,
+      2
+    ]
+  },
+  "purpose": "固定 joint28 主体，探索 attention 查询/键/值分块与归约资源；生成产物去重，不变单案跳过；所有结果仅为探索，入围后独立官方整案验收"
+}

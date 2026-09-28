@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "out": "workspace/pipeline/astra-long-v1",
+  "search_configs": [],
+  "watch": [],
+  "stay_open": true,
+  "auto_audit": true,
+  "scheduler": {
+    "workers": 56,
+    "full_slots": 2,
+    "memory_fraction": 0.75,
+    "timeout_seconds": 3600,
+    "max_retries": 1,
+    "report_interval_seconds": 90
+  },
+  "budget": {
+    "wall_seconds": 21600,
+    "max_proposals": 96,
+    "case_calls": 240,
+    "full_calls": 8,
+    "ai_calls": 18,
+    "profile_calls": 3
+  },
+  "full_grade": {
+    "min_predicted_gain": 0,
+    "max_pending": 3
+  },
+  "ai": {
+    "enabled": true,
+    "timeout_seconds": 300
+  },
+  "triggers": {
+    "batch_size": 8,
+    "cooldown_seconds": 180,
+    "low_watermark": 6,
+    "stagnation_trials": 12,
+    "improvement_threshold": 0.002,
+    "failure_window": 6,
+    "failure_threshold": 5
+  }
+}

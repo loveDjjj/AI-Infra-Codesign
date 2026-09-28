@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""仅本批次的全局研究分析使用 Astra medium。"""
+import os
+import sys
+
+arguments = sys.argv[1:]
+if arguments and arguments[0] == 'exec':
+    arguments[1:1] = ['-m', 'gpt-6-astra', '-c', 'model_reasoning_effort="medium"']
+BINARY = '/usr/local/nvm/versions/node/v16.20.2/bin/codex'
+os.execv(BINARY, [BINARY] + arguments)

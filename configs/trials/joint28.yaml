@@ -27,6 +27,8 @@
         "gemm_n_tile": 32,
         "gemm_narrow_n_tile": null,
         "gemm_k_tile": 64,
+        "w1_preload_k": 32,
+        "w2_preload_k": 32,
         "attention_rf": true,
         "attention_key_tile": 64,
         "attention_value_tile": 64,

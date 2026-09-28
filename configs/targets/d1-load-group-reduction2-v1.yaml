@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "lane": "p1_joint",
+  "base_record": "astra-long-v1-full-012d1ba8cb1e765d262035d38a336f2987f21ccb0a4ac9e9d88021ca37f96ac2",
+  "source_epoch": "fd332761ecc8928a8912929ff6c488b1c31b31f134e61575a5c93d24714af2d0",
+  "sampler": "enumerate",
+  "evidence_ids": [
+    "astra-long-v1-full-012d1ba8cb1e765d262035d38a336f2987f21ccb0a4ac9e9d88021ca37f96ac2"
+  ],
+  "target_id": "d1-load-group-reduction2-v1",
+  "hypothesis": "在双归约硬件上测试D1 W2加载组大小4/8/16与现有权重常驻策略的交互。",
+  "cases": [
+    "M2_D1"
+  ],
+  "variables": {
+    "programs.M2_D1.config.w2_load_group_size": [
+      4,
+      8,
+      16
+    ]
+  },
+  "max_trials": 3,
+  "max_inflight": 3,
+  "priority": 0.7
+}

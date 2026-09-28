@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "target_id": "p1-joint-reduction2-interaction-38eb556b-v1",
+  "lane": "p1_joint",
+  "hypothesis": "固定已审计整案的硬件、W2预载和其余参数，将attention_key_tile设为32，枚举query_tile=8/16与w1_preload_k=16/32的四种组合，检验新硬件上的分块与预载交互。四种完整配置均未在该硬件上测试。",
+  "base_record": "astra-long-v1-full-012d1ba8cb1e765d262035d38a336f2987f21ccb0a4ac9e9d88021ca37f96ac2",
+  "source_epoch": "fd332761ecc8928a8912929ff6c488b1c31b31f134e61575a5c93d24714af2d0",
+  "cases": [
+    "M1_P1"
+  ],
+  "variables": {
+    "programs.M1_P1.config.attention_key_tile": [
+      32
+    ],
+    "programs.M1_P1.config.attention_query_tile": [
+      8,
+      16
+    ],
+    "programs.M1_P1.config.w1_preload_k": [
+      16,
+      32
+    ]
+  },
+  "sampler": "enumerate",
+  "max_trials": 4,
+  "priority": 0.8,
+  "evidence_ids": [
+    "astra-long-v1-full-012d1ba8cb1e765d262035d38a336f2987f21ccb0a4ac9e9d88021ca37f96ac2",
+    "astra-long-v1-case-759998cd4abfe96c0ff322231d6241e804fbde15df130a2c61a3bf06a84401a0",
+    "astra-long-v1-case-aeff3e87da99a58f74fd722e62800ff0dce79bb69b752a4ff04d0b5f78fb3917",
+    "astra-long-v1-case-3d5c76a5e5d6c82ff24199794bba8d4b2cb3cdbf3754bc53b433a5c01b41a197"
+  ]
+}

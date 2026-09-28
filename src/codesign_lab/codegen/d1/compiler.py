@@ -70,8 +70,11 @@ class CompilerConfig:
     attention_triangular: bool = False
     vector_tile: int = 384
     combine_batches: bool = False
+    w2_load_group_size: int = 16
 
     def __post_init__(self):
+        if type(self.w2_load_group_size) is not int or self.w2_load_group_size not in (4, 8, 16):
+            raise ValueError("w2_load_group_size 必须为 4、8 或 16")
         if self.gemm_narrow_n_tile is not None and (
             type(self.gemm_narrow_n_tile) is not int or self.gemm_narrow_n_tile <= 0
         ):

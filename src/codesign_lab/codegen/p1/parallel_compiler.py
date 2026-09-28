@@ -131,14 +131,15 @@ class ParallelBuilder(compiler.Builder):
         # 这些屏障隔开有限的 HBM 突发；计算仍然使用
         # 原来的常驻 K64 操作数分块及累加顺序。
         with self.loop(name + "preload", 0, 1):
-            for inner in range(0, 256, 32):
+            preload_k = self.config.w1_preload_k
+            for inner in range(0, 256, preload_k):
                 lane = weight_lanes[inner // 64]
                 offset = (inner % 64) * 32
                 for shard in range(32):
                     self.active_shard = shard
                     col = shard * 32
-                    self.ld(hbm(b.offset + inner * 1024 + col, 1024, [32, 32], [1024, 1]),
-                            rf(lane, 1024, offset))
+                    self.ld(hbm(b.offset + inner * 1024 + col, preload_k * 32,
+                                [preload_k, 32], [1024, 1]), rf(lane, preload_k * 32, offset))
                 self.active_shard = 0
                 self.barrier()
             for shard in range(32):
@@ -182,13 +183,15 @@ class ParallelBuilder(compiler.Builder):
         weight_lanes=(2,3,6,7)
         self.partition_loops=set()
         with self.loop(name+"preload",0,1):
-            for inner in range(0,512,32):
+            preload_k = self.config.w2_preload_k
+            for inner in range(0,512,preload_k):
                 lane=weight_lanes[inner//128]
                 offset=(inner%128)*16
                 for shard in range(32):
                     self.active_shard=shard
                     part,col=shard//16,(shard%16)*16
-                    self.ld(hbm(b.offset+(part*512+inner)*256+col,512,[32,16],[256,1]),rf(lane,512,offset))
+                    self.ld(hbm(b.offset+(part*512+inner)*256+col,preload_k*16,
+                                [preload_k,16],[256,1]),rf(lane,preload_k*16,offset))
                 self.active_shard=0
                 self.barrier()
             for shard in range(16):

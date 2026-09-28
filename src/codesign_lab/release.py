@@ -48,7 +48,7 @@ def promote(identifier):
     return current
 
 def package(identifier,output):
-    import hashlib,zipfile,tempfile
+    import gzip,hashlib,zipfile,tempfile
     from pathlib import Path
     from .build import build
     from .traces import export,ROOT_THREAD
@@ -82,16 +82,29 @@ def package(identifier,output):
     add(ROOT/'data/iteration-log.md','project/iteration-log.md')
     files['project/selected-candidate/design.json']=(json.dumps(record['config'],indent=2)+'\n').encode()
     # 显式列出打包目录；不递归收录旧工程和临时工作区。
-    for directory in ['src','configs','docs','tests','vendor/official',str(report_path.parent.relative_to(ROOT))]:
+    for directory in ['src','configs','docs','tests','vendor/official']:
         for path in sorted((ROOT/directory).rglob('*')):
+            # 看板由账本生成，完整 HTML 体积大；提交包只保留人工可读的源码与说明。
+            if path == ROOT/'docs/dashboard.html':continue
             if path.is_file() and '__pycache__' not in path.parts and path.suffix not in ['.pyc','.zip'] and path.name!='submission-verification.json':add(path,'project/'+str(path.relative_to(ROOT)))
-    for name in ['README.md','AGENTS.md','lab','pyproject.toml','requirements.lock','data/experiments.jsonl','data/state.json']:
+    for name in ['README.md','AGENTS.md','lab','pyproject.toml','requirements.lock','data/state.json']:
         add(ROOT/name,'project/'+name)
+    # 完整账本留在本地；包内保存被选版本的原始记录，避免重复打包所有历史时序细节。
+    files['project/selected-experiment.json']=(json.dumps(record,ensure_ascii=False,indent=2)+'\n').encode()
+    add(audit_path,'project/selected-evidence/audit.json')
     files['project/build_candidate.py']=b"import sys,json,tempfile,argparse\nfrom pathlib import Path\nsys.path.insert(0,str(Path(__file__).resolve().parent/'src'))\nfrom codesign_lab.build import build\np=argparse.ArgumentParser();p.add_argument('design');p.add_argument('--verify',required=True);a=p.parse_args()\nwith tempfile.TemporaryDirectory() as d: print(json.dumps(build(a.design,Path(d)/'out',a.verify)))\n"
     export(ROOT/'data/agent-trace',Path('/root/.codex/state_5.sqlite'),ROOT_THREAD)
     for path in sorted((ROOT/'data/agent-trace').glob('*')):
-        if path.is_file() and path.suffix in ['.jsonl','.json']:add(path,'agent-trace/'+path.name)
-    if not files['project/iteration-log.md'].strip() or not any(name.startswith('agent-trace/') and name.endswith('.jsonl') for name in files):raise ValueError('Missing manual review records')
+        if not path.is_file() or path.suffix not in ['.jsonl','.json']:continue
+        data=path.read_bytes()
+        # 大型原生会话无损压缩，避免课程 ZIP 的 100 MiB 解压后上限随对话增长而失效。
+        name='agent-trace/'+path.name
+        files[name+'.gz' if path.suffix=='.jsonl' and len(data)>8*1024**2 else name]=(
+            gzip.compress(data,compresslevel=9,mtime=0) if path.suffix=='.jsonl' and len(data)>8*1024**2 else data)
+    files['agent-trace/README.md']=('课程代理轨迹为完整原生 JSONL。较大的 .jsonl.gz 是无损 gzip；'
+        '可用 gzip -dk <文件名> 解压。trace-manifest.json 记录原始字节数与 SHA-256，'
+        'lab verify 会逐份解压核对。\n').encode()
+    if not files['project/iteration-log.md'].strip() or not any(name.startswith('agent-trace/') and (name.endswith('.jsonl') or name.endswith('.jsonl.gz')) for name in files):raise ValueError('Missing manual review records')
     manifest={'baseline_manifest_sha256':report['baseline_manifest_sha256'],'official_starter_sha256':starter_hash,'local_experimental_score':record['score'],'record_id':identifier,'files_sha256':{name:hashlib.sha256(data).hexdigest() for name,data in files.items()}}
     files['project/package-manifest.json']=(json.dumps(manifest,indent=2)+'\n').encode()
     expanded=sum(map(len,files.values()))
@@ -147,6 +160,7 @@ def unpack(archive: zipfile.ZipFile, destination: Path) -> None:
 
 
 def verify(path: Path) -> dict:
+    import gzip
     zip_bytes = path.stat().st_size
     if not 0 < zip_bytes <= 25 * 1024**2:
         raise ValueError('ZIP must be nonempty and at most 25 MiB')
@@ -176,6 +190,18 @@ def verify(path: Path) -> dict:
         for name, expected in recorded.items():
             if hashlib.sha256(archive.read(name)).hexdigest() != expected:
                 raise ValueError(f"Package hash mismatch: {name}")
+        trace_manifest = json.loads(archive.read('agent-trace/trace-manifest.json'))
+        for session in trace_manifest['sessions']:
+            plain = 'agent-trace/' + session['file']
+            compressed = plain + '.gz'
+            if plain in recorded:
+                original = archive.read(plain)
+            elif compressed in recorded:
+                original = gzip.decompress(archive.read(compressed))
+            else:
+                raise ValueError(f"Missing native agent trace: {plain}")
+            if len(original) != session['bytes'] or hashlib.sha256(original).hexdigest() != session['sha256']:
+                raise ValueError(f"Native agent trace mismatch: {plain}")
         starter = archive.read("project/official-starter.zip")
         if hashlib.sha256(starter).hexdigest() != STARTER_SHA256:
             raise ValueError("Official starter hash mismatch")

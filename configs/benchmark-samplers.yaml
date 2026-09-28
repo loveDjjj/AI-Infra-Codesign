@@ -1,0 +1,16 @@
+{
+  "base_record": "joint28_v072_w2_owner_powerfix",
+  "case": "M1_P1",
+  "variables": {
+    "programs.M1_P1.config.attention_query_tile": [8,16,32],
+    "programs.M1_P1.config.attention_key_tile": [32,64],
+    "programs.M1_P1.config.attention_value_tile": [32,64],
+    "programs.M1_P1.config.w1_preload_k": [16,32,64]
+  },
+  "trials": 20,
+  "seeds": [7,123],
+  "workers": 16,
+  "max_inflight": 8,
+  "wall_seconds": 3600,
+  "timeout_seconds": 1800
+}

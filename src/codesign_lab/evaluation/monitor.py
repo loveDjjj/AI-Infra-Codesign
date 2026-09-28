@@ -10,6 +10,7 @@ def sample(pid):
     raw = (root / 'stat').read_text()
     fields = raw[raw.rfind(')') + 2:].split()
     result = {'timestamp': time.time(), 'pid': pid, 'state': fields[0],
+              'parent_pid': int(fields[1]), 'process_group': int(fields[2]), 'session_id': int(fields[3]),
               'cpu_seconds': (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK'),
               'start_ticks': int(fields[19]), 'rss_bytes': int(fields[21]) * os.sysconf('SC_PAGE_SIZE')}
     for name in ('io', 'wchan'):

@@ -32,6 +32,9 @@ class SplitW2Builder(LazyBuilder):
                                 [128, 16], [n_extent, 1]), rf(lane, 2048))
                 self.emit("MMA.ACC", a=rf(0, 128, start_k), b=rf(lane, 2048),
                           acc=rf(2, 16), m=1, n=16, k=128, event=None)
+                # 仅首次权重加载分组同步；默认 16 保持原汇编字节。
+                if cold and (shard + 1) % self.config.w2_load_group_size == 0 and shard + 1 < self.sm_count:
+                    self.barrier()
             if cold and index == 0:
                 self.barrier()
         for shard in range(8, 16):

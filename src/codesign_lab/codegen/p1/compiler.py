@@ -58,6 +58,8 @@ class CompilerConfig:
     gemm_n_tile: int = 16
     gemm_narrow_n_tile: int | None = None
     gemm_k_tile: int = 48
+    w1_preload_k: int = 32
+    w2_preload_k: int = 32
     attention_rf: bool = False
     attention_key_tile: int = 16
     attention_value_tile: int = 16
@@ -90,6 +92,9 @@ class CompilerConfig:
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        for name in ("w1_preload_k", "w2_preload_k"):
+            if getattr(self, name) not in (16, 32, 64):
+                raise ValueError(f"{name} must be one of 16, 32, 64")
 
 
 class Builder:

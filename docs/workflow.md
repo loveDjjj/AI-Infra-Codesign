@@ -1,26 +1,60 @@
-# 工作规范
+# 工作流程
 
-在工程根目录执行 ./lab --help。使用项目启动器，避免 Python/NumPy 版本漂移。
+所有命令从仓库根目录执行。`./lab` 使用锁定的 `.venv`；`vendor/official/` 是只读冻结副本。构建和正式评估使用独立进程，运行中的 campaign 固定源码、配置和官方身份。
+
+## 1. 单个设计
 
 ```bash
-./lab build configs/best.yaml --out workspace/builds/my-design
-./lab run workspace/builds/my-design --level functional --case M2_D1 --out workspace/evaluations/check.json
-./lab run workspace/builds/my-design --level both --out workspace/evaluations/local.json
-./lab run workspace/builds/my-design --level full --out workspace/evaluations/local-grade.json
-./lab profile workspace/builds/my-design --case M2_D1 --compare workspace/evaluations/local-grade.json --out workspace/profiles/d1-trace.json
-./lab audit <full-run-id>
-./lab promote <full-run-id>
-./lab search configs/search.yaml
+./lab build configs/best.yaml --out workspace/builds/check
+./lab run workspace/builds/check --level functional --case M1_P1 --out workspace/evaluations/p1-functional.json
+./lab run workspace/builds/check --level both --case M1_P1 --out workspace/evaluations/p1-both.json
+./lab run workspace/builds/check --level full --out workspace/evaluations/full.json
+./lab audit <完整整案记录ID>
+./lab report
+```
+
+输出路径必须不存在。功能结果、局部周期、预测组合、官方整案和审计分别记录；只有合格且审计通过的整案可视为正式性能事实。`audit` 不自动 `promote`。改变生成器时，先校验默认硬件和两份 ASM 的逐字节再生；改变官方工具则拒绝运行。
+
+## 2. 搜索与动态流水线
+
+```bash
+./lab search configs/search.yaml                                  # 只预览候选
+./lab search configs/search-parallel.yaml --execute --workers 8 --out workspace/search/example
+./lab pipeline configs/pipeline.yaml                               # 只预览配置
+./lab pipeline configs/pipeline.yaml --execute                     # 启动新批次
+./lab pipeline configs/pipeline.yaml --execute --resume            # 相同身份、预算和目录恢复
+./lab pipeline-status --campaign closed-loop-v2
+./lab pipeline-inject configs/targets/<目标>.yaml --campaign closed-loop-v2
+```
+
+流水线按目标展开候选，静态检查后隔离构建，用硬件和对应 ASM 哈希去重；功能通过后释放单案时序，只有同硬件的 P1/D1 可组成预测分数。超过当前已审计最佳的组合才能排入独立官方整案槽位，随后自动审计。官方完整评分不使用探索缓存。任务由内存预算、槽位和累计冷调用预算约束；worker 完成后动态补位。
+
+目标、调度和模型状态在 `workspace/pipeline/<campaign>/`，实际成绩在 `data/experiments.jsonl`。`--resume` 不增加原预算；源码或设置变化必须新开 campaign。项目当前的全局 AI 分析能提出并校验新目标，结构改动则在隔离源码副本中进行。它仍会在候选空间耗尽或结构提案预算用尽时结束，并非保证永不空转。`./lab implementation-loop --campaign <批次> --proposal-id <ID> --execute` 可单独处理已有结构提案。
+
+## 3. 诊断、看板与知识
+
+```bash
+./lab profile workspace/builds/check --case M1_P1 --compare workspace/evaluations/full.json --out workspace/profiles/p1.json
 ./lab report
 ./lab clean --dry-run
 ```
 
-输出路径必须不存在，避免覆盖证据。局部 run 默认开启精确缓存；完整 grade 不读缓存，先后检查官方工具和输入哈希。功能种子进入缓存键，主机监控随 run/profile 自动启动。
+看板生成到 `docs/dashboard.html`，本地浏览器打开即可。`lab clean --dry-run` 只列具体文件，不执行删除。诊断报告中资源利用率与算子跨度是观察，等待原因是推断；适用范围和失败经验写入 `docs/knowledge.md`，实验数字仍以账本和原始报告为准。
 
-账本区分 functional、estimate、both、full。局部更快不能晋升。晋升要求整包合格、报告审计与当前源码再生检查。此次 joint28 已以原审计和新工程字节再生作为证据晋升；新框架已归档 joint28，joint24 保留作回退点；未发生外部上传。
+## 4. 晋升、打包与网站上传
 
-实验记录加锁追加，评估在独立子进程。search 当前只生成候选；不自动并发大规模模拟。并发构建必须使用进程，不能让继承生成器的动态替换共享线程状态。
+```bash
+./lab promote <已审计、当前根源码可再生的整案ID>
+./lab package <记录ID> --out workspace/reports/release.zip
+./lab verify workspace/reports/release.zip
+.venv/bin/python scripts/submit.py workspace/reports/release.zip          # 本地检查
+.venv/bin/python scripts/submit.py workspace/reports/release.zip --submit # 实际网站上传
+```
 
-清理仅提供具体文件预览，不删除。data/、vendor/、核心文档 不纳入清理范围。
+`package` 要求 `reproduction=verified`，即当前根源码能再生所选版本。隔离 epoch 的 `epoch_verified` 报告即使分数更高，也不能直接在根目录打包；必须从对应源码及保全原件另行审计。课程 ZIP 保留根目录 `hardware.json`、两份 ASM、`local-grade.json`，以及迭代记录和课程代理轨迹；大型轨迹在 ZIP 内以无损 `.jsonl.gz` 保存，`lab verify` 会逐份解压核对原始哈希。完整实验账本和生成看板不重复塞入 ZIP。打包与验证不上传网站。
 
-新工程 ./lab package <record-id> --out workspace/reports/release.zip 使用白名单打包并核对原始审计、grade provenance、冻结基线和 seed 7。ZIP 含原始根目录 local-grade.json、完整代理轨迹、迭代记录、独立再生代码和官方 starter。./lab verify 验证 ZIP 哈希、CRC、原始报告和独立再生；本地打包不代表上传。无需为结构迁移重复一次昂贵整包 grade，因为提交输入字节完全一致；真正算法改变后必须再跑原公共命令。
+网站脚本默认学号 `260010081`、名称 `GPT-6-Astra-Ultra`，可显式覆盖。实际上传要求完整合格分数比本地已知个人最佳至少提高 1000 分，且与上次上传间隔至少 10 分钟；回执和查询密钥保存在不入 Git 的 `data/submissions/`。HTTP 连接中断后先查询，避免重复提交。
+
+## 5. GitHub 与本机证据
+
+Git 收录当前实现、配置、文档、测试和轻量事实。`data/agent-trace/`、`data/releases/`、`data/evidence/`、`data/official-starter.zip` 和 `workspace/` 保留在本机并独立备份；`docs/dashboard.html` 随时可生成。克隆 GitHub 仓库后无法仅凭 Git 恢复全部历史隔离源码或直接打出课程 ZIP，须恢复对应受保护材料。冻结官方工具本身保留在 `vendor/official/`。不要为了清理仓库删除课程轨迹或发布原件。

@@ -1,0 +1,229 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "decision_id": {
+      "type": "string"
+    },
+    "lane": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "conclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "claim",
+          "confidence",
+          "evidence_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "new_targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "lane": {
+            "type": "string"
+          },
+          "hypothesis": {
+            "type": "string"
+          },
+          "base_record": {
+            "type": "string"
+          },
+          "source_epoch": {
+            "type": "string"
+          },
+          "cases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "M1_P1",
+                "M2_D1"
+              ]
+            }
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "enum": [
+                    "programs.M1_P1.config.attention_query_tile",
+                    "programs.M1_P1.config.attention_key_tile",
+                    "programs.M1_P1.config.attention_value_tile",
+                    "programs.M1_P1.config.w1_preload_k",
+                    "programs.M1_P1.config.w2_preload_k",
+                    "programs.M1_P1.config.gemm_m_tile",
+                    "programs.M1_P1.config.gemm_k_tile",
+                    "programs.M1_P1.config.gemm_n_group",
+                    "programs.M1_P1.config.vector_tile",
+                    "hardware.reduction_units",
+                    "hardware.cache_mib",
+                    "hardware.sfu_lanes",
+                    "programs.M2_D1.config.w2_load_group_size"
+                  ]
+                },
+                "values": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "required": [
+                "path",
+                "values"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "sampler": {
+            "type": "string",
+            "enum": [
+              "enumerate",
+              "random",
+              "tpe"
+            ]
+          },
+          "max_trials": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "priority": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "target_id",
+          "lane",
+          "hypothesis",
+          "base_record",
+          "source_epoch",
+          "cases",
+          "variables",
+          "sampler",
+          "max_trials",
+          "priority",
+          "evidence_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "stop_targets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "profile_requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "record_id": {
+            "type": "string"
+          },
+          "case": {
+            "type": "string",
+            "enum": [
+              "M1_P1",
+              "M2_D1"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "case",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "implementation_proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane": {
+            "type": "string"
+          },
+          "proposal": {
+            "type": "string"
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "lane",
+          "proposal",
+          "evidence_ids"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "decision_id",
+    "lane",
+    "summary",
+    "conclusions",
+    "new_targets",
+    "stop_targets",
+    "profile_requests",
+    "implementation_proposals"
+  ],
+  "additionalProperties": false
+}

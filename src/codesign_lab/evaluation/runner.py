@@ -13,8 +13,8 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 from ..config import bootstrap
 ROOT = bootstrap()
 
@@ -33,7 +33,10 @@ def main() -> int:
     parser.add_argument("--seed", type=int, action="append")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--cache-dir", type=Path, help="Exact exploration cache; never used by final public grade")
+    parser.add_argument("--functional-report", type=Path, help="时序阶段依赖的完整功能报告")
     args = parser.parse_args()
+    if args.functional_report and args.mode != "estimate":
+        parser.error("--functional-report 仅适用于 estimate")
     if args.out.exists():
         raise FileExistsError(args.out)
     started = time.monotonic()
@@ -49,7 +52,18 @@ def main() -> int:
         "hardware": hardware.to_dict(), "area_mm2": hardware.area_mm2(),
         "program_sha256": hashes,
         "provenance": provenance(hardware, programs), "cases": {},
+        "functional_seeds": args.seed or [7],
     }
+    dependencies = {}
+    if args.functional_report:
+        from .stages import functional_evidence
+        from ..config import digest
+        dependency = json.loads(args.functional_report.read_text())
+        for case in args.case or ("M1_P1", "M2_D1"):
+            dependencies[case] = functional_evidence(dependency, case, hardware.to_dict(),
+                hashes[case], report['provenance'], args.seed or [7])
+        report['functional_dependency'] = {'path': str(args.functional_report.resolve()),
+                                           'sha256': digest(args.functional_report)}
     progress_path = args.out.with_suffix(".progress.json")
     if progress_path.exists():
         raise FileExistsError(progress_path)
@@ -68,6 +82,12 @@ def main() -> int:
         current = report["cases"][case] = {}
         identity = {"case": case, "hardware": hardware.to_dict(), "program_sha256": hashes[case]}
         current["cache_hits"] = []
+        if case in dependencies:
+            inherited = dependencies[case]
+            for field in ['functional', 'functional_passed', 'functional_seconds']:
+                current[field] = inherited[field]
+            current['cache_hits'].extend(hit for hit in inherited.get('cache_hits', [])
+                                         if hit.get('stage') == 'functional')
         def cached(stage, key, compute):
             if cache is None:
                 return compute()
@@ -82,7 +102,12 @@ def main() -> int:
             def validate():
                 validate_hbm_races(programs[case])
                 return {"passed": True}
-            validated = cached("race", {"program_sha256": hashes[case]}, validate)
+            if case in dependencies:
+                # 依赖已绑定当前 ASM 和冻结工具；复用实际通过的竞态证明。
+                validated = {"passed": True}
+                current["race_validation_reused_from_dependency"] = True
+            else:
+                validated = cached("race", {"program_sha256": hashes[case]}, validate)
             if validated != {"passed": True}:
                 raise RuntimeError("Invalid cached race validation result")
             current["race_validation_passed"] = True

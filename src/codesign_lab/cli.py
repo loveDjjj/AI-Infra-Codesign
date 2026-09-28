@@ -7,7 +7,16 @@ def main():
     p=sub.add_parser('build');p.add_argument('config',type=Path);p.add_argument('--out',type=Path,required=True);p.add_argument('--verify',type=Path)
     p=sub.add_parser('run');p.add_argument('candidate',type=Path);p.add_argument('--level',choices=['functional','estimate','both','full'],default='functional');p.add_argument('--case',choices=['M1_P1','M2_D1'],action='append');p.add_argument('--seed',type=int,action='append');p.add_argument('--out',type=Path,required=True);p.add_argument('--no-cache',action='store_true')
     sub.add_parser('report')
-    p=sub.add_parser('search');p.add_argument('config',type=Path)
+    p=sub.add_parser('pipeline');p.add_argument('config',type=Path);p.add_argument('--execute',action='store_true');p.add_argument('--resume',action='store_true')
+    p=sub.add_parser('implementation-loop');p.add_argument('--campaign',required=True);p.add_argument('--execute',action='store_true');p.add_argument('--watch',action='store_true');p.add_argument('--proposal-id');p.add_argument('--retry-failed',action='store_true');p.add_argument('--max-proposals',type=int,default=2);p.add_argument('--min-case-gain',type=float,default=.002);p.add_argument('--min-score-gain',type=float,default=100);p.add_argument('--model',default='gpt-6-astra');p.add_argument('--reasoning-effort',default='medium')
+    p=sub.add_parser('pipeline-status');p.add_argument('--campaign',required=True)
+    p=sub.add_parser('pipeline-inject');p.add_argument('target',type=Path);p.add_argument('--campaign',required=True);p.add_argument('--request-id')
+    p=sub.add_parser('pipeline-analyze');p.add_argument('--campaign',required=True);p.add_argument('--lane',required=True);p.add_argument('--execute',action='store_true');p.add_argument('--timeout',type=int,default=600)
+    p=sub.add_parser('pipeline-decision');p.add_argument('decision',type=Path);p.add_argument('--campaign',required=True);p.add_argument('--request-id')
+    p=sub.add_parser('pipeline-stop-target');p.add_argument('target_id');p.add_argument('--campaign',required=True);p.add_argument('--request-id')
+    p=sub.add_parser('pipeline-priority');p.add_argument('target_id');p.add_argument('priority',type=float);p.add_argument('--campaign',required=True);p.add_argument('--request-id')
+    p=sub.add_parser('pipeline-target-budget');p.add_argument('target_id');p.add_argument('remaining',type=int);p.add_argument('--campaign',required=True);p.add_argument('--request-id')
+    p=sub.add_parser('search');p.add_argument('config',type=Path);p.add_argument('--execute',action='store_true');p.add_argument('--workers',type=int);p.add_argument('--out',type=Path);p.add_argument('--resume',action='store_true')
     p=sub.add_parser('promote');p.add_argument('id')
     p=sub.add_parser('audit');p.add_argument('id')
     p=sub.add_parser('verify');p.add_argument('archive',type=Path)
@@ -15,10 +24,54 @@ def main():
     p=sub.add_parser('clean');p.add_argument('--dry-run',action='store_true',required=True)
     p=sub.add_parser('profile');p.add_argument('candidate',type=Path);p.add_argument('--case',required=True);p.add_argument('--compare',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     args=parser.parse_args()
-    if hasattr(args,'out'):
-        category={'build':'builds','run':'evaluations','profile':'profiles','package':'reports'}[args.command]
+    if args.command=='pipeline':
+        from .search.settings import arguments
+        from .search.pipeline import main as pipeline_main
+        pipeline_main(arguments(args.config,execute=args.execute,resume=args.resume))
+        return
+    if args.command=='implementation-loop':
+        from .search.implementation import main as implementation_main
+        options=['--campaign',args.campaign,'--max-proposals',str(args.max_proposals),
+                 '--min-case-gain',str(args.min_case_gain),'--min-score-gain',str(args.min_score_gain),
+                 '--model',args.model,'--reasoning-effort',args.reasoning_effort]
+        if args.execute:options.append('--execute')
+        if args.watch:options.append('--watch')
+        if args.proposal_id:options.extend(['--proposal-id',args.proposal_id])
+        if args.retry_failed:options.append('--retry-failed')
+        return implementation_main(options)
+    if hasattr(args,'out') and args.out is not None:
+        category={'build':'builds','run':'evaluations','profile':'profiles','package':'reports','search':'search'}[args.command]
         args.out=workspace_output(args.out,category)
-    if args.command=='build':
+    if args.command in ['pipeline-status','pipeline-inject','pipeline-stop-target','pipeline-decision','pipeline-analyze','pipeline-priority','pipeline-target-budget']:
+        from .search.targets import campaign_path,inject
+        directory=campaign_path(args.campaign)
+        if args.command=='pipeline-analyze':
+            from .ai_bridge import capabilities
+            from .search.targets import epoch
+            runtime_state=load(directory/'state.json')
+            if runtime_state['source_epoch']!=epoch():raise ValueError('该批次源码身份已改变，禁止继续 AI 分析')
+            lane=runtime_state.get('analysis',{}).get('lanes',{}).get(args.lane,{})
+            pending=lane.get('pending')
+            if not pending:raise ValueError('此 lane 没有待分析请求')
+            if not args.execute:
+                result={'mode':'只检查，不调用模型','capabilities':capabilities(),'request':pending}
+            else:
+                result=inject(directory,{'op':'analyze','lane':args.lane,
+                    'decision_id':pending['decision_id'],'timeout':args.timeout})
+        elif args.command=='pipeline-status':
+            result={'targets':load(directory/'state.json') if (directory/'state.json').exists() else None,
+                    'scheduler':load(directory/'status.json') if (directory/'status.json').exists() else None}
+        else:
+            if args.command=='pipeline-decision':
+                command={'op':'decision','decision':load(args.decision)}
+            elif args.command=='pipeline-priority':
+                command={'op':'reprioritize','target_id':args.target_id,'priority':args.priority}
+            elif args.command=='pipeline-target-budget':
+                command={'op':'set_remaining_budget','target_id':args.target_id,'remaining':args.remaining}
+            else:
+                command={'op':'add','target':load(args.target)} if args.command=='pipeline-inject' else {'op':'stop','target_id':args.target_id}
+            result=inject(directory,command,args.request_id)
+    elif args.command=='build':
         from .build import build
         result=build(args.config,args.out,args.verify)
     elif args.command in ['run','profile']:
@@ -52,8 +105,13 @@ def main():
         from .report import generate
         result=generate()
     elif args.command=='search':
-        from .search.runner import prepare
-        result=prepare(args.config)
+        from .search.runner import prepare,execute
+        if args.execute:
+            if args.out is None:parser.error('search --execute 必须指定 --out')
+            result=execute(args.config,args.out,workers=args.workers,resume=args.resume)
+        else:
+            if args.resume:parser.error('--resume 需要 --execute')
+            result=prepare(args.config)
     elif args.command=='audit':
         from .release import audit
         result=audit(args.id)

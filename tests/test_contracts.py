@@ -71,7 +71,7 @@ class Contracts(unittest.TestCase):
         self.assertIn('invalid hardware',reject(base))
     def test_clean_never_traverses_long_term_data(self):
         from codesign_lab.release import clean
-        self.assertTrue(all('/workspace/' in record['path'] for record in clean()))
-        self.assertFalse(any('/data/' in record['path'] for record in clean()))
+        self.assertTrue(all(Path(record['path']).resolve().is_relative_to(ROOT/'workspace') for record in clean()))
+        self.assertFalse(any(Path(record['path']).resolve().is_relative_to(ROOT/'data') for record in clean()))
 
 if __name__=='__main__':unittest.main()

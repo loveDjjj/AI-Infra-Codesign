@@ -1,0 +1,37 @@
+{
+  "base": "configs/trials/joint28.yaml",
+  "workers": 16,
+  "max_memory_fraction": 0.8,
+  "task_memory_mib": 1024,
+  "wall_budget_seconds": 3600,
+  "task_timeout_seconds": 1800,
+  "functional_seeds": [
+    7,
+    123
+  ],
+  "cache": true,
+  "cases": [
+    "M2_D1"
+  ],
+  "max_candidates": 24,
+  "variables": {
+    "programs.M2_D1.config.vector_tile": [
+      64,
+      32,
+      128
+    ],
+    "programs.M2_D1.config.gemm_m_tile": [
+      32,
+      16
+    ],
+    "programs.M2_D1.config.gemm_k_tile": [
+      32,
+      64
+    ],
+    "programs.M2_D1.config.gemm_prefetch": [
+      true,
+      false
+    ]
+  },
+  "purpose": "固定硬件的已实现软件参数扫描；真实产物去重，不生效组合不重复评估；仅单案探索，入围后完整官方验收"
+}

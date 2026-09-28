@@ -5,7 +5,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from ..config import bootstrap
+from ..config import bootstrap,digest
 ROOT = bootstrap()
 from codesign.challenge.abi import build_layout
 from codesign.challenge.hardware import Hardware
@@ -21,7 +21,14 @@ parser.add_argument("--compare", type=Path, required=True)
 parser.add_argument("--out", type=Path, required=True)
 args = parser.parse_args()
 if args.out.exists():
-    raise FileExistsError(args.out)
+    existing=json.loads(args.out.read_text())
+    expected={'hardware':digest(args.candidate/'hardware.json'),
+              'program':digest(args.candidate/'programs'/f'{args.case}.asm')}
+    previous=json.loads(args.compare.read_text())['cases'][args.case]['timing']
+    if existing.get('complete_timing_identical') is True and existing.get('input_sha256')==expected and existing.get('compare_sha256')==digest(args.compare) and existing.get('timing')==previous:
+        print(json.dumps({'reused_complete_trace':True,'cycles':previous['cycles']}))
+        raise SystemExit(0)
+    raise ValueError('已有轨迹不匹配本次输入或报告，拒绝覆盖')
 hardware = Hardware.from_dict(json.loads((args.candidate / "hardware.json").read_text()))
 program = (args.candidate / "programs" / f"{args.case}.asm").read_text()
 model, scenario = args.case.split("_")
@@ -46,8 +53,10 @@ for instruction in iter_parse(program):
 from .profile import operator_spans
 mapping_path=args.candidate / 'operator-map.json'
 operators=operator_spans(program,json.loads(mapping_path.read_text()).get(args.case,[]),trace) if mapping_path.exists() else []
-with args.out.open("x") as output:
-    json.dump({"complete_timing_identical": True, "timing": timing,
-               "stages": stages, "operator_spans": operators, "event_trace": trace}, output)
-    output.write("\n")
+from ..search.scheduler import atomic_json
+atomic_json(args.out,{"complete_timing_identical": True, "timing": timing,
+               "stages": stages, "operator_spans": operators, "event_trace": trace,
+               'input_sha256':{'hardware':digest(args.candidate/'hardware.json'),
+                               'program':digest(args.candidate/'programs'/f'{args.case}.asm')},
+               'compare_sha256':digest(args.compare)})
 print(json.dumps({"cycles": timing["cycles"], "stages": len(stages), "events": len(trace)}))

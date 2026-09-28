@@ -1,8 +1,13 @@
 workspace/
+docs/dashboard.html
+data/agent-trace/
+data/releases/
+data/evidence/
 __pycache__/
 *.pyc
 *.egg-info/
 data/.experiments.lock
+data/submissions/
 .venv/
 
 # 本地保留压缩包，Git 不提交；不会删除文件。

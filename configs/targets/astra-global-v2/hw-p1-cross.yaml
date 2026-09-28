@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "target_id": "astra-global-v2-hw-p1-cross",
+  "lane": "hardware",
+  "hypothesis": "将上一轮新硬件上较快的完整P1配置与cache/reduction/SFU八点硬件邻域交叉，P1/D1均作真实评估。比较组合是否改变功耗可行域和整案得分。",
+  "base_record": "sol-global-next-v1-case-30c4a2fdaacedc6ae4a77089505699d70efd843bfcd1f715f89a2f3c29342833",
+  "source_epoch": "b9c193247cf92441cc71ab2a20328f21350e270148eca1ce3c0511a3da4fc212",
+  "cases": [
+    "M1_P1",
+    "M2_D1"
+  ],
+  "variables": {
+    "hardware.cache_mib": [
+      0,
+      1
+    ],
+    "hardware.reduction_units": [
+      1,
+      2
+    ],
+    "hardware.sfu_lanes": [
+      4,
+      8
+    ]
+  },
+  "sampler": "enumerate",
+  "max_trials": 8,
+  "max_inflight": 8,
+  "priority": 0.91,
+  "evidence_ids": [
+    "astra-long-v1-full-012d1ba8cb1e765d262035d38a336f2987f21ccb0a4ac9e9d88021ca37f96ac2",
+    "sol-global-next-v1-case-30c4a2fdaacedc6ae4a77089505699d70efd843bfcd1f715f89a2f3c29342833"
+  ]
+}

@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""长期研究分析调用固定为 Sol medium，不修改全局模型设置。"""
+import os
+import sys
+arguments = sys.argv[1:]
+if arguments and arguments[0] == 'exec':
+    arguments[1:1] = ['-m', 'gpt-6-sol', '-c', 'model_reasoning_effort="medium"']
+BINARY = '/usr/local/nvm/versions/node/v16.20.2/bin/codex'
+os.execv(BINARY, [BINARY] + arguments)

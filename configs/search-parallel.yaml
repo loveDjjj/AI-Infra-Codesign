@@ -1,0 +1,17 @@
+{
+  "base": "configs/trials/joint28.yaml",
+  "workers": 8,
+  "max_memory_fraction": 0.8,
+  "task_memory_mib": 1024,
+  "wall_budget_seconds": 3600,
+  "task_timeout_seconds": 1800,
+  "max_candidates": 4,
+  "functional_seeds": [7, 123],
+  "cache": false,
+  "cases": ["M2_D1"],
+  "variables": {
+    "hardware.cache_mib": [0, 1],
+    "hardware.sfu_lanes": [4, 8]
+  },
+  "purpose": "以四个 D1 独立冷任务比较串并行吞吐；保持 vector8 的现有 RF 布局，硬件变化后必须另测 P1，不能复用旧硬件成绩组合"
+}
