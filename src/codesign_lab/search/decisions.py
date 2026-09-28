@@ -64,6 +64,12 @@ def apply_decision(pool,triggers,decision):
     pending=triggers.state['lanes'].get(lane,{}).get('pending')
     if not pending or pending['decision_id']!=identifier:raise ValueError('决策没有对应待分析请求')
     records=read();valid_ids={r['id'] for r in records}
+    # 结构验证结果先保存在批次状态；只允许引用本次请求实际看到的观测，
+    # 并把其内容随决策固化，避免工作区清理后丢失证据。
+    observed={item['id']: copy.deepcopy(item)
+              for item in triggers.state['lanes'][lane].get('observations', [])
+              if item.get('id') in pending.get('observation_ids', [])}
+    valid_evidence=valid_ids | set(observed)
     commands=[];seen_targets=set()
     for raw in decision['new_targets']:
         target=copy.deepcopy(raw)
@@ -83,7 +89,7 @@ def apply_decision(pool,triggers,decision):
             raise ValueError('停止目标不属于当前 lane')
         commands.append({'op':'stop','target_id':target_id})
     for item in decision['conclusions']+decision['implementation_proposals']:
-        if not set(item['evidence_ids'])<=valid_ids:raise ValueError('决策引用不存在的证据')
+        if not set(item['evidence_ids'])<=valid_evidence:raise ValueError('决策引用不存在的证据')
     for item in decision['implementation_proposals']:
         identity=item.get('transformation_id')
         if identity is not None and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',identity) is None:
@@ -98,7 +104,10 @@ def apply_decision(pool,triggers,decision):
     from .triggers import Triggers
     staged_triggers=Triggers(staged.state)
     staged_triggers.acknowledge(lane,identifier)
-    record={'id':identifier,'lane':lane,'source_epoch':pool.source_epoch,'decision':decision}
+    cited={identity for item in decision['conclusions']+decision['implementation_proposals']
+           for identity in item['evidence_ids']}
+    record={'id':identifier,'lane':lane,'source_epoch':pool.source_epoch,'decision':decision,
+            'evidence_snapshot':{identity: observed[identity] for identity in cited & set(observed)}}
     staged.state.setdefault('applied_decisions',{})[identifier]=record
     pool.state.clear();pool.state.update(staged.state)
     # triggers 的引用重新指向事务提交后的状态，不能保留旧字典。

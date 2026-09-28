@@ -134,11 +134,13 @@ class PipelineChecks(unittest.TestCase):
             instance.pool = Mock()
             instance.budget = Mock()
             with patch.object(controller_module, 'ROOT', root):
-                instance.completed({'stage': 'implementation_validate', 'proposal_id': 'first',
+                instance.completed({'key': 'implementation_validate-first-recovery2',
+                    'stage': 'implementation_validate', 'proposal_id': 'first',
                     'budget_key': 'structure-budget'},
                     {'status': 'infrastructure_failed', 'error': 'worker lost'})
             self.assertEqual(json.loads(path.read_text())['status'], 'FAILED')
             observation = instance.triggers.observe.call_args.args[1]
+            self.assertEqual(observation['id'], 'implementation-implementation_validate-first-recovery2')
             self.assertEqual(observation['proposal_status'], 'FAILED')
             self.assertEqual(observation['case'], 'M1_P1')
             instance.budget.reused.assert_called_once_with('structure-budget')

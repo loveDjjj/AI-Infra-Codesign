@@ -935,7 +935,10 @@ class Pipeline:
             if status in {'REJECTED', 'FAILED', 'WAITING_FOR_LAUNCH', 'LAUNCHED',
                           'TARGET_INJECTED',
                           'AUDITED_NO_PROMOTION'}:
-                self.triggers.observe('global', {'id': 'implementation-' + job['proposal_id'],
+                # 同一提案的恢复验证可能产生新的事实；按持久任务身份区分，
+                # 恢复启动时重放相同任务仍会被触发器去重。
+                task_identity = job.get('key', job['stage'] + '-' + job['proposal_id'])
+                self.triggers.observe('global', {'id': 'implementation-' + task_identity,
                     'observation_kind': 'implementation', 'proposal_id': job['proposal_id'],
                     'case': state.get('proposal', {}).get('case'), 'proposal_status': status,
                     'case_gain': state.get('case_gain'), 'official_score': state.get('official_score'),

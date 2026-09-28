@@ -54,7 +54,8 @@ def proposals(campaign: Path):
                                'source_epoch': source, 'lane': lane,
                                'case': case, 'transformation_id': transformation,
                                'proposal': proposal['proposal'],
-                               'evidence_ids': proposal['evidence_ids']}
+                               'evidence_ids': proposal['evidence_ids'],
+                               'evidence_snapshot': decision.get('evidence_snapshot', {})}
 
 
 def campaign_generator_unchanged(campaign: Path):
@@ -273,6 +274,15 @@ def snapshot_project(destination: Path, baseline: dict):
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(target, target_is_directory=True)
     (destination / 'workspace/pipeline').mkdir(parents=True)
+    (destination / 'workspace/families').mkdir(parents=True)
+    search_python = load(ROOT / 'configs/search-toolchain.yaml')['python']
+    search_root = Path(search_python).parts[0:2]
+    if tuple(search_root) != ('workspace', 'search-env'):
+        raise ValueError('独立搜索环境路径与隔离快照约定不一致')
+    installed_search = ROOT / 'workspace/search-env'
+    if not (installed_search / 'bin/python').is_file():
+        raise ValueError('主工程缺少锁定的独立搜索环境')
+    (destination / 'workspace/search-env').symlink_to(installed_search, target_is_directory=True)
     generator_hashes = {str(path.relative_to(ROOT)): digest(path)
                         for path in (ROOT / 'src/codesign_lab/codegen').rglob('*.py')}
     copied = {name: digest(destination / name) for name in generator_hashes}
@@ -468,6 +478,8 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
                         'cycles': info.get('timing', {}).get('cycles'),
                         'peak_power_w': info.get('timing', {}).get('peak_window_power_w')}
                         for case, info in record.get('cases', {}).items()}})
+            elif identifier in item.get('evidence_snapshot', {}):
+                evidence.append(item['evidence_snapshot'][identifier])
         prompt = (
             '你正在实现独立源码 epoch 的一个结构实验。仅可修改本副本的 '
             'src/codesign_lab/codegen 下 Python 文件，必要时新增 tests/test_implementation_*.py。'

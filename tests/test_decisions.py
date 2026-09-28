@@ -76,3 +76,25 @@ class DecisionChecks(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'结构机制 ID'):
                 apply_decision(self.pool,self.triggers,self.decision)
         self.assertIsNotNone(self.triggers.lane('p1_attention')['pending'])
+
+    def test_structural_observation_can_be_cited_and_is_preserved(self):
+        self.decision['new_targets'] = []
+        observed = {'id': 'implementation-example', 'observation_kind': 'implementation',
+                    'proposal_status': 'RESEARCH_READY', 'case_gain': 0.01}
+        lane = self.triggers.lane('p1_attention')
+        lane['observations'].append(observed)
+        lane['pending']['observation_ids'] = [observed['id']]
+        self.decision['conclusions'] = [{'claim': '结构测试已有有效增益', 'confidence': 0.9,
+                                        'evidence_ids': [observed['id']]}]
+        with patch('codesign_lab.search.decisions.read', return_value=self.records), \
+             patch('codesign_lab.search.decisions.append_decision') as append:
+            self.assertEqual(apply_decision(self.pool, self.triggers, self.decision)['status'], 'accepted')
+            self.assertEqual(append.call_args.args[0]['evidence_snapshot'][observed['id']], observed)
+
+    def test_unseen_structural_observation_is_not_valid_evidence(self):
+        self.decision['new_targets'] = []
+        self.decision['conclusions'] = [{'claim': '没有来源的结论', 'confidence': 0.9,
+                                        'evidence_ids': ['implementation-unknown']}]
+        with patch('codesign_lab.search.decisions.read', return_value=self.records):
+            with self.assertRaisesRegex(ValueError, '决策引用不存在的证据'):
+                apply_decision(self.pool, self.triggers, self.decision)

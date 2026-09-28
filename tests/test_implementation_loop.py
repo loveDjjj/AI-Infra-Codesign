@@ -115,6 +115,8 @@ class ImplementationChecks(unittest.TestCase):
             module.snapshot_project(destination, {'candidate': 'data/releases/joint28'})
             self.assertEqual([path.name for path in (destination / 'data/releases').iterdir()], ['joint28'])
             self.assertTrue((destination / 'workspace/pipeline').is_dir())
+            self.assertTrue((destination / 'workspace/families').is_dir())
+            self.assertTrue((destination / 'workspace/search-env/bin/python').is_file())
             self.assertEqual(module.digest(destination / 'data/releases/joint28/hardware.json'),
                              module.digest(ROOT / 'data/releases/joint28/hardware.json'))
 
