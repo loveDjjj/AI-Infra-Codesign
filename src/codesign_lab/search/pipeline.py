@@ -858,11 +858,13 @@ class Pipeline:
             if active >= self.args.implementation_max_proposals:
                 break
             state = directory / identifier / 'state.json'
-            status = load(state).get('status') if state.exists() else 'QUEUED'
+            state_data = load(state) if state.exists() else {}
+            status = state_data.get('status', 'QUEUED')
             if status in TERMINAL | {'WAITING_FOR_LAUNCH'} or status not in {
                     'QUEUED', 'CODED', 'GRADED', 'RESEARCH_READY'}:
                 continue
-            job_key = 'implementation-' + identifier
+            retry = int(state_data.get('recovery_attempts', 0))
+            job_key = 'implementation-' + identifier + ('-recovery' + str(retry) if retry else '')
             if job_key in self.seen:
                 continue
             self.enqueue({'key': job_key, 'stage': 'implementation',
@@ -906,6 +908,21 @@ class Pipeline:
             status = state.get('status', 'MISSING')
             if job.get('budget_key') and not state.get('official_attempted'):
                 self.budget.reused(job['budget_key'])
+            if status == 'FAILED' and result['status'] == 'completed' and \
+                    state.get('recovery_attempts', 0) < 1 and not self.budget.expired() and \
+                    str(state.get('error', '')).startswith((
+                        'RuntimeError: default-off 失败', 'RuntimeError: regression 失败')):
+                from .implementation import retry_infrastructure_failure
+                try:
+                    state = retry_infrastructure_failure(state_path)
+                    state['recovery_attempts'] = 1
+                    atomic_json(state_path, state)
+                    self.process_implementations()
+                    status = state['status']
+                except (ValueError, OSError):
+                    # 校验不满足可恢复条件时保留原失败证据，交给全局分析。
+                    state = load(state_path)
+                    status = state['status']
             if status in {'REJECTED', 'FAILED', 'WAITING_FOR_LAUNCH', 'LAUNCHED',
                           'TARGET_INJECTED',
                           'AUDITED_NO_PROMOTION'}:

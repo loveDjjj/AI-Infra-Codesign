@@ -102,8 +102,15 @@ class PipelineChecks(unittest.TestCase):
             instance.pool.state['analysis']['lanes']['global'] = {'session_id': 'planner'}
             instance.process_implementations()
             instance.process_implementations()
-        self.assertEqual([item['proposal_id'] for item in instance.pending], ['first', 'second'])
-        self.assertTrue(all(item['timeout'] == 21600 for item in instance.pending))
+            self.assertEqual([item['proposal_id'] for item in instance.pending], ['first', 'second'])
+            self.assertTrue(all(item['timeout'] == 21600 for item in instance.pending))
+            instance.pending.clear()
+            state = Path(directory) / 'workspace/implementation-loop/structure-campaign/first/state.json'
+            state.parent.mkdir(parents=True)
+            state.write_text(json.dumps({'status': 'CODED', 'recovery_attempts': 1}))
+            instance.process_implementations()
+        self.assertEqual([item['key'] for item in instance.pending],
+                         ['implementation-first-recovery1'])
 
     def test_interrupted_structure_is_recorded_and_sent_to_global_analysis(self):
         import codesign_lab.search.pipeline as controller_module
@@ -160,6 +167,34 @@ class PipelineChecks(unittest.TestCase):
                 instance.completed({'stage': 'implementation', 'proposal_id': 'first',
                     'budget_key': 'structure-budget'}, {'status': 'completed'})
             instance.budget.reused.assert_not_called()
+
+    def test_known_validation_infrastructure_failure_retries_without_recoding(self):
+        import codesign_lab.search.pipeline as controller_module
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / 'workspace/implementation-loop/campaign/first/state.json'
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps({'status': 'FAILED',
+                'error': 'RuntimeError: default-off 失败；见日志',
+                'proposal': {'case': 'M1_P1'}}))
+            instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+            instance.out = root / 'workspace/pipeline/campaign'
+            instance.done = []
+            instance.triggers, instance.pool, instance.budget = Mock(), Mock(), Mock()
+            instance.budget.expired.return_value = False
+            instance.process_implementations = Mock()
+            def recover(path):
+                self.assertEqual(path, state_path)
+                return {'status': 'CODED', 'proposal': {'case': 'M1_P1'}}
+            with patch.object(controller_module, 'ROOT', root), \
+                 patch('codesign_lab.search.implementation.retry_infrastructure_failure',
+                       side_effect=recover):
+                instance.completed({'stage': 'implementation', 'proposal_id': 'first'},
+                    {'status': 'completed'})
+            self.assertEqual(json.loads(state_path.read_text())['status'], 'CODED')
+            self.assertEqual(json.loads(state_path.read_text())['recovery_attempts'], 1)
+            instance.process_implementations.assert_called_once()
+            instance.triggers.observe.assert_not_called()
 
     def test_failed_build_never_releases_evaluation(self):
         instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
