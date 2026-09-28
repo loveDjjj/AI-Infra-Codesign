@@ -31,6 +31,30 @@ class ImplementationChecks(unittest.TestCase):
                 (release / 'generator-source.tar.gz').unlink()
                 self.assertEqual(module.best_record(), older)
 
+    def test_case_baseline_uses_fastest_compatible_audited_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('overall', 'faster-p1', 'other-hardware'):
+                release = root / 'data/releases' / name
+                release.mkdir(parents=True)
+                (release / 'local-grade.json').write_text('{}')
+            def row(name, score, hardware, p1, d1):
+                return {'id': name, 'scope': 'full', 'eligible': True, 'audited': True,
+                        'score': score, 'reproduction': 'verified',
+                        'candidate': 'data/releases/' + name,
+                        'config': {'hardware': hardware}, 'cases': {
+                            case: {'functional_passed': True, 'timing': {
+                                'cycles': cycles, 'peak_window_power_w': 19}}
+                            for case, cycles in (('M1_P1', p1), ('M2_D1', d1))}}
+            overall = row('overall', 49283, {'sm_count': 16}, 396729, 41883)
+            p1 = row('faster-p1', 48695, {'sm_count': 16}, 394545, 43139)
+            alien = row('other-hardware', 48000, {'sm_count': 32}, 300000, 30000)
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'read', return_value=[overall, p1, alien]):
+                self.assertEqual(module.best_record(), overall)
+                self.assertEqual(module.best_record('M1_P1'), p1)
+                self.assertEqual(module.best_record('M2_D1'), overall)
+
     def test_epoch_snapshot_restores_release_generator_before_git_baseline(self):
         release = ROOT / 'data/releases/official-1790581630771528243'
         if not release.is_dir():

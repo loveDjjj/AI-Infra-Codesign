@@ -68,7 +68,7 @@ def campaign_generator_unchanged(campaign: Path):
                                for name in paths)
 
 
-def best_record():
+def best_record(case=None):
     def available(row):
         if row.get('scope') != 'full' or row.get('eligible') is not True or \
                 row.get('audited') is not True or not isinstance(row.get('score'), (int, float)):
@@ -90,7 +90,21 @@ def best_record():
     rows = [row for row in read() if available(row)]
     if not rows:
         raise ValueError('缺少已审计且可再生的整案基线')
-    return max(rows, key=lambda row: row['score'])
+    scored = max(rows, key=lambda row: row['score'])
+    if case is None:
+        return scored
+    if case not in {'M1_P1', 'M2_D1'}:
+        raise ValueError('未知结构实验案例')
+    # 单案结构实验从相同硬件的最快合格实现出发；整案分数可能被另一案
+    # 拉低，不能因此错过该案例已经验证的更快源码。
+    compatible = [row for row in rows
+                  if row.get('config', {}).get('hardware') == scored.get('config', {}).get('hardware')
+                  and row.get('cases', {}).get(case, {}).get('functional_passed') is True
+                  and isinstance(row['cases'][case].get('timing', {}).get('cycles'), int)
+                  and row['cases'][case]['timing'].get('peak_window_power_w', float('inf')) <= 20]
+    if not compatible:
+        raise ValueError('当前最高分硬件缺少可再生的合格单案基线')
+    return min(compatible, key=lambda row: (row['cases'][case]['timing']['cycles'], -row['score']))
 
 
 def origin_root():
@@ -957,7 +971,7 @@ class ImplementationLoop:
         if not session_id:
             return state
         baseline = next((row for row in read() if row['id'] == state.get('baseline_id')),
-                        None) if state['status'] == 'CODED' else best_record()
+                        None) if state['status'] == 'CODED' else best_record(item['case'])
         if baseline is None:
             raise ValueError('已编码实验的基线记录不可取回')
         snapshot = state_path.parent / 'source'
