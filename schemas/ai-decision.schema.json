@@ -195,6 +195,9 @@
           "lane": {
             "type": "string"
           },
+          "transformation_id": {
+            "type": "string"
+          },
           "proposal": {
             "type": "string"
           },

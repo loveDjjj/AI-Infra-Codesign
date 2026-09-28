@@ -31,6 +31,8 @@
 
 目标、调度和模型状态在 `workspace/pipeline/<campaign>/`，实际成绩在 `data/experiments.jsonl`。`--resume` 不增加原预算；源码或设置变化必须新开 campaign。项目当前的全局 AI 分析能提出并校验新目标，结构改动则在隔离源码副本中进行。它仍会在候选空间耗尽或结构提案预算用尽时结束，并非保证永不空转。`./lab implementation-loop --campaign <批次> --proposal-id <ID> --execute` 可单独处理已有结构提案。
 
+从已审计 release 准备平铺实现族：`./lab family-restore official-1790581630771528243 --out workspace/families/official-1790581630771528243`。命令核对归档源码和硬件、P1、D1 三份生成产物，并只在隔离目录中设置最高分基线；不启动流水线。结构提案的编码会话与长期全局规划会话独立；相同 `transformation_id` 在同源码、同案例只处理一次。多实现族统一调度仍在开发中，不能把几个隔离目录各自开成一套满负载流水线。
+
 ## 3. 诊断、看板与知识
 
 ```bash

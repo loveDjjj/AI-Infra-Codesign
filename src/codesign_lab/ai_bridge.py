@@ -45,6 +45,8 @@ def analyze(snapshot, *, lane, directory, session_id=None, executable='codex', t
             '当本次 lane 为 global 时，决策顶层 lane 仍为 global，'
             '但每个 new_targets 的 lane 必须是具体研究方向，例如 p1_joint、p1_attention、p1_w2、d1_decode 或 hardware；'
             '新目标不得使用 global 作为 lane。'
+            '结构提案请填写稳定的 transformation_id，同一机制跨分析回合保持相同 ID，'
+            '不同机制使用不同 ID；不要仅换说法重复提案。'
             '允许提出空 new_targets；空间已覆盖时不要为了填满队列重复目标。\n'
             +json.dumps(snapshot,ensure_ascii=False,allow_nan=False))
         child=subprocess.Popen(command,cwd=ROOT,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,

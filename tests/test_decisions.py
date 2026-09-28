@@ -56,3 +56,23 @@ class DecisionChecks(unittest.TestCase):
         with self.assertRaises(ValueError):schema_check(wrong,schema)
         wrong=copy.deepcopy(self.decision);wrong['decision_id']='a'*64
         with self.assertRaises(ValueError):apply_decision(self.pool,self.triggers,wrong)
+
+    def test_structural_identity_is_validated_before_decision_commit(self):
+        self.decision['new_targets'] = []
+        self.decision['implementation_proposals'] = [{
+            'lane': 'p1_w2', 'transformation_id': 'w2-input-reuse',
+            'proposal': '复用输入块', 'evidence_ids': ['base']}]
+        with patch('codesign_lab.search.decisions.read',return_value=self.records), \
+             patch('codesign_lab.search.decisions.append_decision') as record:
+            self.assertEqual(apply_decision(self.pool,self.triggers,self.decision)['status'],'accepted')
+            record.assert_called_once()
+
+    def test_invalid_structural_identity_does_not_commit(self):
+        self.decision['new_targets'] = []
+        self.decision['implementation_proposals'] = [{
+            'lane': 'p1_w2', 'transformation_id': '../escape',
+            'proposal': '无效 ID', 'evidence_ids': ['base']}]
+        with patch('codesign_lab.search.decisions.read',return_value=self.records):
+            with self.assertRaisesRegex(ValueError,'结构机制 ID'):
+                apply_decision(self.pool,self.triggers,self.decision)
+        self.assertIsNotNone(self.triggers.lane('p1_attention')['pending'])

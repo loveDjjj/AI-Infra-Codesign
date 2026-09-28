@@ -9,6 +9,7 @@ def main():
     sub.add_parser('report')
     p=sub.add_parser('pipeline');p.add_argument('config',type=Path);p.add_argument('--execute',action='store_true');p.add_argument('--resume',action='store_true')
     p=sub.add_parser('implementation-loop');p.add_argument('--campaign',required=True);p.add_argument('--execute',action='store_true');p.add_argument('--watch',action='store_true');p.add_argument('--proposal-id');p.add_argument('--retry-failed',action='store_true');p.add_argument('--max-proposals',type=int,default=2);p.add_argument('--min-case-gain',type=float,default=.002);p.add_argument('--min-score-gain',type=float,default=100);p.add_argument('--model',default='gpt-6-astra');p.add_argument('--reasoning-effort',default='medium')
+    p=sub.add_parser('family-restore');p.add_argument('record_id');p.add_argument('--out',type=Path,required=True)
     p=sub.add_parser('pipeline-status');p.add_argument('--campaign',required=True)
     p=sub.add_parser('pipeline-inject');p.add_argument('target',type=Path);p.add_argument('--campaign',required=True);p.add_argument('--request-id')
     p=sub.add_parser('pipeline-analyze');p.add_argument('--campaign',required=True);p.add_argument('--lane',required=True);p.add_argument('--execute',action='store_true');p.add_argument('--timeout',type=int,default=600)
@@ -39,6 +40,13 @@ def main():
         if args.proposal_id:options.extend(['--proposal-id',args.proposal_id])
         if args.retry_failed:options.append('--retry-failed')
         return implementation_main(options)
+    if args.command=='family-restore':
+        from .search.implementation import restore_family
+        destination=args.out.resolve()
+        if not destination.is_relative_to((ROOT/'workspace/families').resolve()):
+            raise ValueError('实现族只能恢复到 workspace/families')
+        print(json.dumps(restore_family(args.record_id,destination),ensure_ascii=False,indent=2))
+        return
     if hasattr(args,'out') and args.out is not None:
         category={'build':'builds','run':'evaluations','profile':'profiles','package':'reports','search':'search'}[args.command]
         args.out=workspace_output(args.out,category)

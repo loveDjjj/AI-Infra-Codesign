@@ -84,6 +84,10 @@ def apply_decision(pool,triggers,decision):
         commands.append({'op':'stop','target_id':target_id})
     for item in decision['conclusions']+decision['implementation_proposals']:
         if not set(item['evidence_ids'])<=valid_ids:raise ValueError('决策引用不存在的证据')
+    for item in decision['implementation_proposals']:
+        identity=item.get('transformation_id')
+        if identity is not None and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',identity) is None:
+            raise ValueError('结构机制 ID 无效')
     for item in decision['profile_requests']:
         if item['record_id'] not in valid_ids:raise ValueError('profile 引用不存在的记录')
     # 暂存完整状态；任一目标越域或超预算时不提交任何队列变化。

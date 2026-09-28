@@ -22,6 +22,7 @@
 ./lab report
 ./lab pipeline configs/pipeline.yaml                 # 只检查计划
 ./lab pipeline configs/pipeline.yaml --execute       # 显式执行
+./lab family-restore official-1790581630771528243 --out workspace/families/official-1790581630771528243  # 恢复已审计实现族
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
 ```
 

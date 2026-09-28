@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 
 from ..config import ROOT, digest, load, verify_official
@@ -25,10 +26,11 @@ CONTROLLER_FILES = ('src/codesign_lab/search/implementation.py', 'src/codesign_l
 
 
 def proposals(campaign: Path):
-    """只接受此源码批次的已有决策；同一决策重复读取不会重复实现。"""
+    """只接受此源码批次的已有决策；相同结构机制只编码一次。"""
     state = load(campaign / 'state.json')
     source = state['source_epoch']
     ledger = ROOT / 'data/decisions.jsonl'
+    seen = set()
     for line in ledger.read_text().splitlines() if ledger.exists() else []:
         decision = json.loads(line)
         if decision.get('source_epoch') != source:
@@ -37,10 +39,18 @@ def proposals(campaign: Path):
             lane = proposal.get('lane', '')
             if not (lane.startswith('p1') or lane.startswith('d1')):
                 continue
+            case = CASES['p1' if lane.startswith('p1') else 'd1']
+            # 明确的 transformation_id 优先；旧决策退化为规范化后的原文精确去重。
+            # 不用模糊相似度丢弃不同假设。
+            transformation = proposal.get('transformation_id') or ' '.join(proposal['proposal'].split())
+            key = (source, case, transformation)
+            if key in seen:
+                continue
+            seen.add(key)
             identifier = hashlib.sha256((decision['id'] + ':' + str(index)).encode()).hexdigest()[:20]
             yield identifier, {'id': identifier, 'decision_id': decision['id'],
                                'source_epoch': source, 'lane': lane,
-                               'case': CASES['p1' if lane.startswith('p1') else 'd1'],
+                               'case': case, 'transformation_id': transformation,
                                'proposal': proposal['proposal'],
                                'evidence_ids': proposal['evidence_ids']}
 
@@ -179,17 +189,27 @@ raise SystemExit(not answer.wasSuccessful())
 
 
 def inherit_controller_files(destination: Path):
-    """仅继承主项目结构控制文件，绝不覆盖当前 epoch 的生成器。"""
+    """继承主项目非生成器控制代码和校验模式，保留 epoch 的算子实现。"""
     origin = origin_root()
     hashes = {}
-    for name in CONTROLLER_FILES:
+    for name in controller_files(origin):
         source = origin / name
         if not source.is_file():
             raise ValueError('主项目缺少结构实验控制文件：' + name)
         if origin != ROOT:
+            (destination / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination / name)
         hashes[name] = digest(destination / name)
     return hashes
+
+
+def controller_files(origin: Path):
+    source_root = origin / 'src/codesign_lab'
+    names = {str(path.relative_to(origin)) for path in source_root.rglob('*.py')
+             if not path.is_relative_to(source_root / 'codegen')}
+    names.update(str(path.relative_to(origin)) for path in (origin / 'schemas').glob('*.json'))
+    names.update(CONTROLLER_FILES)
+    return sorted(names)
 
 
 def snapshot_project(destination: Path, baseline: dict):
@@ -215,11 +235,11 @@ def snapshot_project(destination: Path, baseline: dict):
     release = release if release.is_absolute() else ROOT / release
     if not release.is_relative_to(ROOT / 'data/releases') or not release.is_dir():
         raise ValueError('基线必须有受保护的 release 目录')
-    # 回归测试要求账本引用的受保护报告都可取回；副本是临时工作区。
-    for source in sorted((ROOT / 'data/releases').iterdir()):
-        if not source.is_dir():
-            continue
-        shutil.copytree(source, destination / 'data/releases' / source.name)
+    # 结构验证只需当前基线与固定 joint28 测试锚点；其余历史 release 留在主工程。
+    required_releases = {release, ROOT / 'data/releases/joint28'}
+    for source in sorted(required_releases):
+        if source.is_dir():
+            shutil.copytree(source, destination / 'data/releases' / source.name)
     for name in ('iteration-log.md', 'official-starter.zip'):
         if (ROOT / 'data' / name).exists():
             shutil.copy2(ROOT / 'data' / name, destination / 'data' / name)
@@ -231,7 +251,7 @@ def snapshot_project(destination: Path, baseline: dict):
         link = destination / 'data/agent-trace' / relative
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(target, target_is_directory=True)
-    (destination / 'workspace').mkdir()
+    (destination / 'workspace/pipeline').mkdir(parents=True)
     generator_hashes = {str(path.relative_to(ROOT)): digest(path)
                         for path in (ROOT / 'src/codesign_lab/codegen').rglob('*.py')}
     copied = {name: digest(destination / name) for name in generator_hashes}
@@ -251,6 +271,117 @@ def snapshot_project(destination: Path, baseline: dict):
                       '-c', 'user.email=implementation@localhost', 'commit', '-qm', '隔离源码基线'],
         'git-commit', timeout=60)
     return generator_hashes
+
+
+def restore_release_generator(destination: Path, release: Path):
+    """只恢复已审计 release 中与 build.json 哈希完全匹配的算子源码。"""
+    expected = load(release / 'build.json')['source_sha256']
+    prefix = 'src/codesign_lab/codegen/'
+    if not expected or any(not name.startswith(prefix) or not re.fullmatch(r'[A-Za-z0-9_./-]+\.py', name)
+                           or '..' in Path(name).parts for name in expected):
+        raise ValueError('release 的生成器源码清单无效')
+    archive = release / 'generator-source.tar.gz'
+    sources = {}
+    with tarfile.open(archive, 'r:gz') as bundle:
+        for member in bundle:
+            if member.name not in expected:
+                continue
+            if not member.isfile() or member.name in sources:
+                raise ValueError('生成器归档含重复或非普通文件')
+            stream = bundle.extractfile(member)
+            if stream is None or member.size > 4 * 1024**2:
+                raise ValueError('生成器归档文件无效或过大')
+            content = stream.read(4 * 1024**2 + 1)
+            if hashlib.sha256(content).hexdigest() != expected[member.name]:
+                raise ValueError('生成器归档与 release 构建清单不一致：' + member.name)
+            sources[member.name] = content
+    if set(sources) != set(expected):
+        raise ValueError('生成器归档缺少构建清单文件')
+    target = destination / prefix
+    if target.exists():
+        shutil.rmtree(target)
+    for name, content in sources.items():
+        path = destination / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    return expected
+
+
+def restore_family(record_id: str, destination: Path):
+    """从受保护整案恢复冻结实现族，并立即逐字节验证三个提交产物。"""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', record_id):
+        raise ValueError('release ID 无效')
+    release = ROOT / 'data/releases' / record_id
+    record = next((row for row in read() if row['id'] == record_id), None)
+    if not record or record.get('scope') != 'full' or record.get('eligible') is not True or \
+            record.get('audited') is not True or not release.is_dir() or \
+            load(release / 'local-grade.audit.json').get('audit_passed') is not True:
+        raise ValueError('仅能恢复有受保护原件的已审计合格整案')
+    candidate = destination / 'workspace/builds/anchor-build'
+    if destination.exists():
+        expected_source = load(release / 'build.json')['source_sha256']
+        expected_artifacts = load(release / 'build.json')['sha256']
+        family_manifest = destination / 'workspace/family.json'
+        family_records = destination / 'data/experiments.jsonl'
+        restored_record = next((row for row in (json.loads(line) for line in family_records.read_text().splitlines())
+                                if row.get('id') == record_id), None) if family_records.is_file() else None
+        if not (destination / '.git').is_dir() or not (destination / 'configs/anchor.json').is_file() or \
+                not (destination / 'configs/best.yaml').is_file() or \
+                not (destination / 'data/state.json').is_file() or \
+                digest(destination / 'configs/anchor.json') != digest(release / 'config.json') or \
+                digest(destination / 'configs/best.yaml') != digest(release / 'config.json') or \
+                load(destination / 'data/state.json').get('promoted_record') != record_id or \
+                not restored_record or restored_record.get('reproduction') != 'verified' or \
+                not family_manifest.is_file() or load(family_manifest).get('record_id') != record_id or \
+                any(not (destination / name).is_file() or digest(destination / name) != value
+                    for name, value in expected_source.items()) or \
+                any(not (destination / name).is_file() or digest(destination / name) != digest(ROOT / name)
+                    for name in controller_files(ROOT)) or \
+                not all((candidate / name).is_file() for name in ARTIFACTS) or \
+                artifacts(candidate) != expected_artifacts:
+            raise ValueError('已存在的实现族目录未通过源码或产物身份核对')
+        return {'record_id': record_id, 'source': str(destination),
+                'artifact_sha256': artifacts(candidate), 'reused': True}
+    snapshot_project(destination, {'candidate': str(release.relative_to(ROOT))})
+    restore_release_generator(destination, release)
+    config = destination / 'configs/anchor.json'
+    shutil.copy2(release / 'config.json', config)
+    run(destination, ['git', 'add', 'src/codesign_lab/codegen', 'configs/anchor.json'],
+        'anchor-add', timeout=30)
+    run(destination, ['git', '-c', 'user.name=Implementation Bot',
+                      '-c', 'user.email=implementation@localhost', 'commit', '-qm',
+                      '恢复已审计算子源码'], 'anchor-commit', timeout=30)
+    run(destination, [interpreter(), '-m', 'codesign_lab.cli', 'build', str(config),
+                      '--out', str(candidate), '--verify', str(destination / 'data/releases' / record_id)],
+        'anchor-build', timeout=300)
+    shutil.copy2(release / 'config.json', destination / 'configs/best.yaml')
+    family_state = load(destination / 'data/state.json')
+    family_state['promoted_record'] = record_id
+    atomic_json(destination / 'data/state.json', family_state)
+    ledger = destination / 'data/experiments.jsonl'
+    records = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    restored = next((row for row in records if row['id'] == record_id), None)
+    if restored is None:
+        raise ValueError('隔离账本缺少已审计 release 记录')
+    restored['reproduction'] = 'verified'
+    restored['verified_from_release'] = record_id
+    ledger.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in records))
+    run(destination, ['git', 'add', 'configs/best.yaml'], 'best-add', timeout=30)
+    run(destination, ['git', '-c', 'user.name=Implementation Bot',
+                      '-c', 'user.email=implementation@localhost', 'commit', '-qm',
+                      '设置已审计实现族基线'], 'best-commit', timeout=30)
+    generator_hashes = load(release / 'build.json')['source_sha256']
+    control_hashes = {name: digest(destination / name) for name in controller_files(ROOT)}
+    atomic_json(destination / 'workspace/source-lineage.json',
+                {'generator_source': str(release), 'generator_hashes': generator_hashes,
+                 'controller_source': str(ROOT), 'controller_hashes': control_hashes})
+    atomic_json(destination / 'workspace/family.json', {
+        'record_id': record_id, 'generator_sha256': generator_hashes,
+        'controller_sha256': control_hashes, 'artifact_sha256': artifacts(candidate),
+        'source_archive_sha256': digest(release / 'generator-source.tar.gz'),
+        'official_manifest_sha256': digest(destination / 'vendor/official/isolation-manifest.json')})
+    return {'record_id': record_id, 'source': str(destination),
+            'artifact_sha256': artifacts(candidate), 'reused': False}
 
 
 def changed_files(snapshot: Path):
@@ -295,17 +426,14 @@ def verify_snapshot_official(snapshot: Path):
 
 def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
                 baseline: dict, timeout: int, model: str, effort: str):
-    """同一全局会话串行写入隔离副本；是否成功完全由后续关卡判定。"""
+    """每个结构提案使用独立编码会话；全局规划会话保持可用。"""
     import uuid
     uuid.UUID(session_id)
     lock_root = Path(os.environ.get('CODEX_SESSION_LOCK_ROOT',
         str(ROOT / 'workspace/ai-sessions')))
     lock_root.mkdir(parents=True, exist_ok=True)
-    legacy = campaign / 'ai/global.session.lock'
-    legacy.parent.mkdir(parents=True, exist_ok=True)
-    with (lock_root / (session_id + '.session.lock')).open('a') as lock, legacy.open('a') as old_lock:
+    with (lock_root / ('coder-' + item['id'] + '.session.lock')).open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        fcntl.flock(old_lock, fcntl.LOCK_EX)
         output = snapshot / 'workspace/implementation-logs/codex-final.txt'
         output.parent.mkdir(parents=True, exist_ok=True)
         by_id = {record['id']: record for record in read()}
@@ -336,7 +464,7 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
         executable = os.environ.get('CODEX_IMPLEMENTATION_CLI', 'codex')
         command = [executable, 'exec', '--sandbox', 'workspace-write', '-C', str(snapshot),
                    '-m', model, '-c', 'model_reasoning_effort="' + effort + '"',
-                   'resume', session_id, '--json', '-o', str(output), '-']
+                   '--json', '-o', str(output), '-']
         logs = origin_root() / 'data/agent-trace/implementation' / item['id']
         logs.mkdir(parents=True, exist_ok=True)
         with (logs / 'codex.events.jsonl').open('w') as stdout, (logs / 'codex.stderr.log').open('w') as stderr:
@@ -353,9 +481,13 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
         events = [json.loads(line) for line in (logs / 'codex.events.jsonl').read_text().splitlines()
                   if line.startswith('{')]
         seen = {event.get('thread_id') for event in events if event.get('type') == 'thread.started'}
-        if seen != {session_id} or not any(event.get('type') == 'turn.completed' for event in events):
-            raise ValueError('Codex 恢复的会话身份或完成事件无效')
-        return str(output)
+        if len(seen) != 1 or not any(event.get('type') == 'turn.completed' for event in events):
+            raise ValueError('Codex 编码会话身份或完成事件无效')
+        coder_session_id = seen.pop()
+        uuid.UUID(coder_session_id)
+        if coder_session_id == session_id:
+            raise ValueError('编码会话意外复用了全局规划会话')
+        return {'output': str(output), 'coder_session_id': coder_session_id}
 
 
 def grade_record(snapshot: Path, report: Path):
@@ -552,8 +684,9 @@ class ImplementationLoop:
                     '--out', str(baseline_build), '--verify', str(snapshot / 'data/releases' / source_release)],
                     'baseline-build', timeout=300)
                 save('CODING', snapshot=str(snapshot))
-                coding_turn(snapshot, self.campaign, session_id, item, baseline,
-                            self.code_timeout, self.model, self.effort)
+                coding = coding_turn(snapshot, self.campaign, session_id, item, baseline,
+                                    self.code_timeout, self.model, self.effort)
+                save('CODING', coder_session_id=coding['coder_session_id'])
                 if original_hashes != {str(p.relative_to(ROOT)): digest(p)
                                        for p in (ROOT / 'src/codesign_lab/codegen').rglob('*.py')}:
                     raise ValueError('编码回合修改了原批次生成器源码')
@@ -643,7 +776,8 @@ def main(argv=None):
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--watch', action='store_true')
     parser.add_argument('--poll-seconds', type=int, default=30)
-    parser.add_argument('--max-proposals', type=int, default=2)
+    parser.add_argument('--max-proposals', type=int, default=2,
+                        help='每轮最多启动的结构提案数；已完成提案不再占用后续轮次额度')
     parser.add_argument('--proposal-id', help='仅运行指定结构提案，便于复核单个方向')
     parser.add_argument('--retry-failed', action='store_true',
                         help='恢复已完成编码但在默认配置复现阶段失败的提案')
@@ -676,21 +810,24 @@ def main(argv=None):
         if args.retry_failed:
             retry_infrastructure_failure(loop.directory / args.proposal_id / 'state.json')
         while True:
-            count = 0
+            started = 0
             current = [(identifier,item) for identifier,item in proposals(campaign)
                        if args.proposal_id is None or identifier == args.proposal_id]
             for _, item in current:
-                if count >= args.max_proposals:
+                if started >= args.max_proposals:
                     break
+                path = loop.directory / item['id'] / 'state.json'
+                previous = load(path).get('status') if path.is_file() else 'QUEUED'
+                if previous in TERMINAL:
+                    continue
                 state = loop.process(item)
+                if previous == 'QUEUED' and state['status'] != 'QUEUED':
+                    started += 1
                 if state['status'] not in TERMINAL:
-                    break
-                count += 1
+                    continue
                 print(json.dumps({'proposal_id': item['id'], 'status': state['status']}, ensure_ascii=False), flush=True)
                 if state['status'] == 'LAUNCHED':
                     return 0
-            if count >= args.max_proposals:
-                return 0
             if not args.watch:
                 break
             # 搜索主控已落盘总结、且已知提案均处理完后，监视进程不再空转。
