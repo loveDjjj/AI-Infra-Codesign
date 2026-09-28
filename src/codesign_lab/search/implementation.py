@@ -69,9 +69,25 @@ def campaign_generator_unchanged(campaign: Path):
 
 
 def best_record():
-    rows = [row for row in read() if row.get('scope') == 'full' and row.get('eligible') is True
-            and row.get('audited') is True and isinstance(row.get('score'), (int, float))
-            and row.get('reproduction') == 'verified']
+    def available(row):
+        if row.get('scope') != 'full' or row.get('eligible') is not True or \
+                row.get('audited') is not True or not isinstance(row.get('score'), (int, float)):
+            return False
+        if row.get('reproduction') not in {'verified', 'epoch_verified'}:
+            return False
+        candidate = row.get('candidate')
+        if not isinstance(candidate, str):
+            return False
+        release = Path(candidate)
+        release = release if release.is_absolute() else ROOT / release
+        if not release.is_relative_to(ROOT / 'data/releases') or not release.is_dir():
+            return False
+        if row['reproduction'] == 'epoch_verified':
+            return all((release / name).is_file() for name in
+                       ('build.json', 'generator-source.tar.gz', 'local-grade.json'))
+        return (release / 'local-grade.json').is_file()
+
+    rows = [row for row in read() if available(row)]
     if not rows:
         raise ValueError('缺少已审计且可再生的整案基线')
     return max(rows, key=lambda row: row['score'])
@@ -290,8 +306,19 @@ def snapshot_project(destination: Path, baseline: dict):
     copied = {name: digest(destination / name) for name in generator_hashes}
     if generator_hashes != copied:
         raise ValueError('隔离生成器复制后哈希不一致')
+    if baseline.get('reproduction') == 'epoch_verified':
+        # 跨源码版本的最高分必须从受保护归档恢复生成器，否则基线重建会
+        # 悄悄使用主源码，把正确的成绩错误归因于另一套实现。
+        baseline_hashes = restore_release_generator(
+            destination, destination / 'data/releases' / release.name)
+    else:
+        baseline_hashes = generator_hashes
     atomic_json(destination / 'workspace/source-lineage.json',
-                {'generator_source': str(ROOT), 'generator_hashes': generator_hashes,
+                {'generator_source': str(release) if baseline.get('reproduction') == 'epoch_verified'
+                                     else str(ROOT),
+                 'generator_hashes': baseline_hashes,
+                 'campaign_generator_source': str(ROOT),
+                 'campaign_generator_hashes': generator_hashes,
                  'controller_source': str(origin), 'controller_hashes': controller_hashes})
     run(destination, ['git', 'init', '-q'], 'git-init', timeout=30)
     (destination / '.git/safe-config').write_text('[safe]\n\tdirectory = ' + str(destination) + '\n')

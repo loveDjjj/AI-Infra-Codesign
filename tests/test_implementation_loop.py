@@ -15,6 +15,37 @@ from codesign_lab.config import ROOT
 
 
 class ImplementationChecks(unittest.TestCase):
+    def test_best_record_includes_reproducible_epoch_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / 'data/releases/new-best'
+            release.mkdir(parents=True)
+            for name in ('build.json', 'generator-source.tar.gz', 'local-grade.json'):
+                (release / name).write_text('{}')
+            older = {'scope': 'full', 'eligible': True, 'audited': True,
+                     'score': 48000, 'reproduction': 'verified',
+                     'candidate': 'data/releases/new-best'}
+            newer = dict(older, score=49000, reproduction='epoch_verified')
+            with patch.object(module, 'ROOT', root), patch.object(module, 'read', return_value=[older, newer]):
+                self.assertEqual(module.best_record(), newer)
+                (release / 'generator-source.tar.gz').unlink()
+                self.assertEqual(module.best_record(), older)
+
+    def test_epoch_snapshot_restores_release_generator_before_git_baseline(self):
+        release = ROOT / 'data/releases/official-1790581630771528243'
+        if not release.is_dir():
+            self.skipTest('本机没有受保护的最高分 release')
+        with tempfile.TemporaryDirectory(prefix='implementation-snapshot-', dir=ROOT / 'workspace') as directory:
+            destination = Path(directory) / 'source'
+            baseline = {'candidate': str(release), 'reproduction': 'epoch_verified'}
+            original = module.snapshot_project(destination, baseline)
+            expected = json.loads((release / 'build.json').read_text())['source_sha256']
+            actual = {name: module.digest(destination / name) for name in expected}
+            self.assertEqual(actual, expected)
+            self.assertEqual(json.loads((destination / 'workspace/source-lineage.json').read_text())
+                             ['generator_hashes'], expected)
+            self.assertEqual(original, {name: module.digest(ROOT / name) for name in original})
+
     def test_validate_worker_accepts_official_handoff_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
