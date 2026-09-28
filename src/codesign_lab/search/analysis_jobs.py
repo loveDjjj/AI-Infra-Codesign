@@ -38,7 +38,8 @@ class AnalysisCall:
         return load(Path(self.metadata['answer']))
 
 
-def prepare(directory,snapshot,*,lane,attempt,session_id,timeout,executable='codex'):
+def prepare(directory,snapshot,*,lane,attempt,session_id,timeout,executable='codex',
+            model='gpt-6-astra',reasoning_effort='medium'):
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
     identifier=snapshot['request']['decision_id']
     stem=directory/(lane+'-'+identifier+'-attempt'+str(attempt))
@@ -46,7 +47,8 @@ def prepare(directory,snapshot,*,lane,attempt,session_id,timeout,executable='cod
     request=artifact('.request.json');answer=artifact('.answer.json');spec=artifact('.spec.json')
     python,_=runtime()
     atomic_json(request,{'snapshot':snapshot,'lane':lane,'session_id':session_id,
-        'directory':str(directory),'timeout':timeout,'answer':str(answer),'executable':executable})
+        'directory':str(directory),'timeout':timeout,'answer':str(answer),'executable':executable,
+        'model':model,'reasoning_effort':reasoning_effort})
     atomic_json(spec,{'job':{'key':'ai-'+identifier+'-'+str(attempt),'stage':'ai',
         'command':[python,'-m','codesign_lab.evaluation.analysis',str(request)]},
         'cwd':str(ROOT),'result':str(artifact('.result.json')),'timeout':timeout+30})

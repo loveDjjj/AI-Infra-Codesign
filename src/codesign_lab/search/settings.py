@@ -10,7 +10,8 @@ FIELDS = {
                'case_calls': 'max-case-calls', 'full_calls': 'max-full-calls',
                'ai_calls': 'max-ai-calls', 'profile_calls': 'max-profile-calls'},
     'full_grade': {'min_predicted_gain': 'min-predicted-gain', 'max_pending': 'max-pending-full'},
-    'ai': {'timeout_seconds': 'ai-timeout', 'mode': 'analysis-mode'},
+    'ai': {'timeout_seconds': 'ai-timeout', 'mode': 'analysis-mode',
+           'model': 'analysis-model', 'reasoning_effort': 'analysis-effort'},
     'triggers': {'batch_size': 'analysis-batch-size', 'cooldown_seconds': 'analysis-cooldown',
                  'low_watermark': 'analysis-low-watermark', 'stagnation_trials': 'stagnation-trials',
                  'improvement_threshold': 'improvement-threshold',
@@ -46,6 +47,12 @@ def arguments(path, *, execute=False, resume=False):
             elif name == 'mode':
                 if value not in {'per_lane','global'}:raise ValueError('ai.mode 必须为 per_lane 或 global')
                 argv.extend(['--analysis-mode',value])
+            elif name == 'model':
+                if not isinstance(value,str) or not value:raise ValueError('ai.model 无效')
+                argv.extend(['--analysis-model',value])
+            elif name == 'reasoning_effort':
+                if value not in {'low','medium','high','xhigh','max'}:raise ValueError('ai.reasoning_effort 无效')
+                argv.extend(['--analysis-effort',value])
             else:
                 if type(value) not in (int, float): raise ValueError('数值字段无效：' + name)
                 argv.extend(['--' + mapping[name], str(value)])

@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from ..config import load,digest
+from ..config import ROOT,load,digest
 from .scheduler import atomic_json
 from .samplers import target_seed
 from .prune import reject
@@ -20,7 +20,9 @@ def request_job(p,target_id,entry,operation,request_id,fields=None):
     payload={'client':{'directory':str(p.out/'samplers'/target_id),
         'variables':entry['definition']['variables'],
         'scope':{'source_epoch':p.pool.source_epoch,'hardware_hash':digest(base/'hardware.json'),
-                 'case':entry['definition']['cases'][0]},
+                 'case':entry['definition']['cases'][0],
+                 **({'family_sha256':entry['definition']['execution_sha256']}
+                    if entry['definition'].get('execution_root') else {})},
         'seed':target_seed(entry['definition']),'startup_trials':12},
         'operation':operation,'request_id':request_id,'fields':fields or {}}
     if spec.exists() and load(spec)!=payload:raise ValueError('采样请求身份改变')
@@ -61,11 +63,13 @@ def prepare(p,target_id,entry):
     if entry['status'] not in {'QUEUED','ACTIVE'}:return
     entry['status']='ACTIVE';entry.setdefault('candidates',{})
     state=entry.setdefault('adaptive',{'counter':0,'trials':{},'pending_jobs':[],'processed':[]})
-    base_key=identity(entry['base_config']);entry['base_key']=base_key
+    source_root=Path(entry['definition'].get('execution_root',ROOT))
+    base_key=p.design_key(entry['base_config'],source_root);entry['base_key']=base_key
     base=p.out/'builds'/base_key;config=p.out/'configs'/(base_key+'.json')
     if not config.exists():atomic_json(config,entry['base_config'])
     p.enqueue({'key':'build-'+base_key,'stage':'build','candidate':base,'cases':[],'seeds':[7,123],
-        'target_owned':True,'memory_bytes':1024**3,'command':[p.python,'-m','codesign_lab.cli','build',str(config),'--out',str(base)]})
+        'target_owned':True,'memory_bytes':1024**3,'source_root':str(source_root),
+        'command':p.build_command(source_root,config,base)})
     result=p.out/'jobs'/('build-'+base_key+'.result.json')
     if not result.exists():return
     if load(result)['status']!='completed':entry.update(status='FAILED',error='TPE 基准构建失败');return
@@ -165,7 +169,8 @@ def _complete(p,job,result):
                 node=config;parts=path.split('.')
                 for part in parts[:-1]:node=node[part]
                 node[parts[-1]]=value
-            candidate_id=identity(config)
+            source_root=Path(entry['definition'].get('execution_root',ROOT))
+            candidate_id=p.design_key(config,source_root)
             if candidate_id not in entry['candidates']:
                 reason=reject(config);entry['trials_launched']+=1
                 entry['candidates'][candidate_id]={'status':'STATIC_REJECTED' if reason else 'BUILDING',
@@ -177,7 +182,8 @@ def _complete(p,job,result):
                     path=p.out/'configs'/(candidate_id+'.json');atomic_json(path,config)
                     p.enqueue({'key':'build-'+candidate_id,'stage':'build','candidate':p.out/'builds'/candidate_id,
                         'cases':[],'seeds':[7,123],'target_owned':True,'priority':entry['definition']['priority'],
-                        'memory_bytes':1024**3,'command':[p.python,'-m','codesign_lab.cli','build',str(path),'--out',str(p.out/'builds'/candidate_id)]})
+                        'memory_bytes':1024**3,'source_root':str(source_root),
+                        'command':p.build_command(source_root,path,p.out/'builds'/candidate_id)})
     if job['operation']=='ask' and answer is not None and entry['status']!='ACTIVE':
         state.setdefault('unconsumed_proposals',[]).append({'request_id':job['request_id'],
             'proposal':answer,'reason':'目标已停止或失败；保留后端 trial 身份，不构建'})

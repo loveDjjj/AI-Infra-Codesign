@@ -34,10 +34,13 @@ class BridgeChecks(unittest.TestCase):
             self.assertEqual((target/'attempt-1.stderr.log').read_text(),'error\n')
 
     def test_resume_same_session_and_returns_decision(self):
-        with tempfile.TemporaryDirectory() as directory,patch('codesign_lab.ai_bridge.capabilities',return_value={'version':'fake'}),patch('codesign_lab.ai_bridge.subprocess.Popen',side_effect=FakeProcess),patch('codesign_lab.ai_bridge.write_trace'):
+        with tempfile.TemporaryDirectory() as directory,patch('codesign_lab.ai_bridge.capabilities',return_value={'version':'fake'}),patch('codesign_lab.ai_bridge.subprocess.Popen',side_effect=FakeProcess) as launched,patch('codesign_lab.ai_bridge.write_trace'):
             result=analyze({'request':{'decision_id':'a'*64}},lane='p1_attention',directory=directory,session_id=SESSION)
             self.assertEqual(result['session_id'],SESSION)
             self.assertEqual(result['decision']['new_targets'],[])
+            command=launched.call_args.args[0]
+            self.assertEqual(command[command.index('--model')+1],'gpt-6-astra')
+            self.assertIn('model_reasoning_effort=medium',command)
 
     def test_wrong_resumed_session_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory,patch('codesign_lab.ai_bridge.capabilities',return_value={'version':'fake'}),patch('codesign_lab.ai_bridge.subprocess.Popen',side_effect=FakeProcess),patch('codesign_lab.ai_bridge.write_trace'):

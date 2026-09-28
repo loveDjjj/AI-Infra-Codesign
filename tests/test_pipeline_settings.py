@@ -19,10 +19,13 @@ class SettingsChecks(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path=Path(directory)/'pipeline.json'
             path.write_text(json.dumps({'schema_version':1,'out':'workspace/pipeline/global-mode-test',
-                'search_configs':[],'watch':[],'ai':{'enabled':True,'mode':'global'}}))
+                'search_configs':[],'watch':[],'ai':{'enabled':True,'mode':'global',
+                    'model':'gpt-6-astra','reasoning_effort':'medium'}}))
             argv=arguments(path)
             self.assertIn('--ai-enabled',argv)
             self.assertEqual(argv[argv.index('--analysis-mode')+1],'global')
+            self.assertEqual(argv[argv.index('--analysis-model')+1],'gpt-6-astra')
+            self.assertEqual(argv[argv.index('--analysis-effort')+1],'medium')
 
     def test_implementation_worker_is_opt_in_and_configured(self):
         argv=self.settings({'implementation':{'enabled':True,'model':'gpt-6-astra',

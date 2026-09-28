@@ -109,8 +109,8 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
                     digest(source / 'vendor/official/isolation-manifest.json') != \
                     digest(ROOT / 'vendor/official/isolation-manifest.json'):
                 raise ValueError('冻结实现族来源身份与历史记录不一致')
-            if target['sampler'] == 'tpe':
-                raise ValueError('冻结实现族动态目标当前只支持枚举或随机采样')
+            if target['sampler'] == 'tpe' and target.get('prior_record_ids'):
+                raise ValueError('冻结实现族 TPE 暂不导入旧源码先验')
             target['execution_root'] = str(source)
             target['execution_sha256'] = actual
     if 'prior_record_ids' in target:

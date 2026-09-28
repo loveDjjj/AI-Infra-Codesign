@@ -17,7 +17,11 @@ class OptunaSampler:
             raise ValueError('搜索后端依赖版本不符合锁定环境')
         if algorithm not in {'tpe','random'} or type(seed) is not int or startup_trials<1:
             raise ValueError('采样后端设置无效')
-        if set(scope)!={'source_epoch','hardware_hash','case'} or scope['case'] not in {'M1_P1','M2_D1'}:
+        expected={'source_epoch','hardware_hash','case'}
+        family=scope.get('family_sha256')
+        if (frozenset(scope) not in {frozenset(expected),frozenset(expected|{'family_sha256'})}
+                or scope['case'] not in {'M1_P1','M2_D1'}
+                or (family is not None and (not isinstance(family,str) or not re.fullmatch(r'[0-9a-f]{64}',family)))):
             raise ValueError('TPE 需要固定源码、硬件与单案例身份')
         if not variables or any(not values or len(set(values))!=len(values) for values in variables.values()):
             raise ValueError('离散参数域为空或重复')

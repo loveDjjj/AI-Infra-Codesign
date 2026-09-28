@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -108,6 +109,7 @@ class Pipeline:
                 'report_interval': 30,
                 'max_profile_calls': 2,
                 'ai_enabled': False, 'ai_timeout': 600, 'analysis_mode': 'per_lane', 'stay_open': False,
+                'analysis_model': 'gpt-6-astra', 'analysis_effort': 'medium',
                 'stop_on_exhaustion': False,
                 'implementation_enabled': False, 'implementation_model': 'gpt-6-astra',
                 'implementation_effort': 'medium', 'implementation_max_proposals': 2,
@@ -157,7 +159,9 @@ class Pipeline:
         self.restore_jobs()
         from .analyst import Analyst
         self.analyst = Analyst(self.pool, self.triggers, self.budget, self.out / 'ai',
-            enabled=getattr(args, 'ai_enabled', False), timeout=getattr(args, 'ai_timeout', 600))
+            enabled=getattr(args, 'ai_enabled', False), timeout=getattr(args, 'ai_timeout', 600),
+            model=getattr(args, 'analysis_model', 'gpt-6-astra'),
+            reasoning_effort=getattr(args, 'analysis_effort', 'medium'))
 
     def accept_release(self):
         """将已审计且本目录可取回的最佳整案作为组合参照。"""
@@ -1123,6 +1127,8 @@ def main(argv=None):
     parser.add_argument('--min-predicted-gain', type=float, default=0)
     parser.add_argument('--ai-enabled', action='store_true')
     parser.add_argument('--ai-timeout', type=int, default=600)
+    parser.add_argument('--analysis-model', default='gpt-6-astra')
+    parser.add_argument('--analysis-effort', choices=['low','medium','high','xhigh','max'], default='medium')
     parser.add_argument('--analysis-mode', choices=['per_lane','global'], default='per_lane')
     parser.add_argument('--implementation-enabled', action='store_true')
     parser.add_argument('--implementation-model', default='gpt-6-astra')
@@ -1157,6 +1163,8 @@ def main(argv=None):
         parser.error('结构实验门槛无效')
     if args.resume and not args.execute:
         parser.error('--resume 需要 --execute')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+',args.analysis_model):
+        parser.error('分析模型无效')
     if min(args.analysis_batch_size, args.stagnation_trials, args.failure_window, args.failure_threshold, args.report_interval) <= 0 or args.failure_threshold > args.failure_window or args.analysis_cooldown < 0 or args.analysis_low_watermark < 0 or not 0 < args.improvement_threshold < 1:
         parser.error('分析触发阈值无效')
     if any(Path(name).name != name for name in args.watch):
@@ -1178,6 +1186,7 @@ def main(argv=None):
                        'profile_calls': args.max_profile_calls,
                        'max_proposals': args.max_proposals},
             'ai_enabled': args.ai_enabled, 'auto_audit': not args.no_auto_audit,
+            'analysis_model': args.analysis_model, 'analysis_effort': args.analysis_effort,
             'max_retries': args.max_retries, 'max_pending_full': args.max_pending_full}, ensure_ascii=False))
         return
     lock_path = Path(os.environ.get('CODESIGN_PIPELINE_LOCK_PATH',

@@ -27,7 +27,9 @@
   },
   "ai": {
     "enabled": false,
-    "timeout_seconds": 600
+    "timeout_seconds": 600,
+    "model": "gpt-6-astra",
+    "reasoning_effort": "medium"
   },
   "triggers": {
     "batch_size": 8,

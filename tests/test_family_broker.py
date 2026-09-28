@@ -45,6 +45,11 @@ class FamilyBrokerChecks(TestCase):
                       'evidence_ids': []}
             accepted, _base = validate_target(target, epoch(), [record])
             self.assertEqual(accepted['execution_root'], str(source))
+            tpe = dict(target, sampler='tpe')
+            accepted_tpe, _base = validate_target(tpe, epoch(), [record])
+            self.assertEqual(accepted_tpe['execution_root'], str(source))
+            with self.assertRaisesRegex(ValueError, '旧源码先验'):
+                validate_target(dict(tpe, prior_record_ids=['family-base']), epoch(), [record])
             code.write_text('value = 2\n')
             with self.assertRaisesRegex(ValueError, '来源身份'):
                 validate_target(target, epoch(), [record])

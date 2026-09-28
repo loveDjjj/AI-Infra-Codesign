@@ -20,11 +20,14 @@ def capabilities(executable='codex'):
     return {'version':version,'resume_schema_supported':True}
 
 
-def analyze(snapshot, *, lane, directory, session_id=None, executable='codex', timeout=600, isolated_session=True):
+def analyze(snapshot, *, lane, directory, session_id=None, executable='codex', timeout=600,
+            isolated_session=True, model='gpt-6-astra', reasoning_effort='medium'):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',lane):
         raise ValueError('lane 无效')
     if session_id is not None:
         uuid.UUID(session_id)
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+',model) or reasoning_effort not in {'low','medium','high','xhigh','max'}:
+        raise ValueError('分析模型或推理档位无效')
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
     # 同一会话跨源码批次共享锁；无会话的首次调用沿用 lane 锁。
     lock_root=Path(os.environ.get('CODEX_SESSION_LOCK_ROOT',
@@ -35,7 +38,8 @@ def analyze(snapshot, *, lane, directory, session_id=None, executable='codex', t
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         version=capabilities(executable)
         attempt=str(uuid.uuid4());output=directory/(attempt+'.decision.json')
-        command=[executable,'exec','--sandbox','read-only']
+        command=[executable,'exec','--sandbox','read-only','--model',model,
+                 '-c','model_reasoning_effort='+reasoning_effort]
         if session_id:
             command+=['resume',session_id]
         command+=['--json','--output-schema',str(ROOT/'schemas/ai-decision.schema.json'),'-o',str(output),'-']

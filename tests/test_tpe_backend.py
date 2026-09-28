@@ -9,6 +9,14 @@ from codesign_lab.search.tpe import OptunaSampler
 class TPEBackendChecks(unittest.TestCase):
     scope={'source_epoch':'test-source','hardware_hash':'hw','case':'M2_D1'}
 
+    def test_family_scope_is_pinned_and_rejects_invalid_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scope=self.scope|{'family_sha256':'a'*64}
+            sampler=OptunaSampler(directory,{'x':[1,2]},scope)
+            self.assertEqual(sampler.scope['family_sha256'],'a'*64)
+            with self.assertRaises(ValueError):
+                OptunaSampler(directory+'-other',{'x':[1,2]},self.scope|{'family_sha256':'bad'})
+
     def observation(self,**changes):
         return {'id':'observed','case':'M2_D1','hardware_hash':'hw','functional_passed':True,
                 'cycles':100,'peak_power_w':15}|changes

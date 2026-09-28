@@ -12,7 +12,9 @@ def main():
     args=parser.parse_args();request=load(args.request)
     answer=analyze(request['snapshot'],lane=request['lane'],directory=request['directory'],
         session_id=request['session_id'],executable=request.get('executable','codex'),
-        timeout=request['timeout'],isolated_session=False)
+        timeout=request['timeout'],isolated_session=False,
+        model=request.get('model','gpt-6-astra'),
+        reasoning_effort=request.get('reasoning_effort','medium'))
     atomic_json(Path(request['answer']),answer)
 
 

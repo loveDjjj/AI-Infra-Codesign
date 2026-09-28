@@ -10,9 +10,10 @@ from ..config import load
 
 class Analyst:
     def __init__(self, pool, triggers, budget, directory, *, enabled=False, max_inflight=2,
-                 timeout=600, callback=None):
+                 timeout=600, callback=None, model='gpt-6-astra', reasoning_effort='medium'):
         self.pool=pool;self.triggers=triggers;self.budget=budget;self.directory=directory
         self.enabled=enabled;self.max_inflight=max_inflight;self.timeout=timeout
+        self.model=model;self.reasoning_effort=reasoning_effort
         self.callback=callback or analyze
         self.executor=ThreadPoolExecutor(max_workers=max_inflight) if callback else None
         self.active={}
@@ -89,14 +90,16 @@ class Analyst:
             if self.executor is None:
                 from .analysis_jobs import prepare,AnalysisCall
                 metadata=prepare(self.directory,copy.deepcopy(snapshot),lane=lane,attempt=attempt,
-                    session_id=entry.get('session_id'),timeout=timeout)
+                    session_id=entry.get('session_id'),timeout=timeout,
+                    model=self.model,reasoning_effort=self.reasoning_effort)
                 entry['running_job']=metadata
                 self.pool.save()
                 self.active[lane]=AnalysisCall(metadata,launch=True)
                 continue
             self.pool.save()
             self.active[lane]=self.executor.submit(self.callback,copy.deepcopy(snapshot),lane=lane,
-                directory=self.directory,session_id=entry.get('session_id'),timeout=timeout)
+                directory=self.directory,session_id=entry.get('session_id'),timeout=timeout,
+                model=self.model,reasoning_effort=self.reasoning_effort)
 
     def close(self):
         if self.executor is not None:self.executor.shutdown(wait=False,cancel_futures=True)
