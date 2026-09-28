@@ -46,10 +46,10 @@ def select_jobs(pending, active, external, workers, full_slots, memory_budget, a
     """官方验收优先，探索始终保留验收容量，实时内存不足时不启动。"""
     selected = []
     reserved = sum(x['memory_bytes'] for x in active)
-    official = {'full', 'verify', 'audit'}
-    # 编码使用探索槽；验证可能进入整案，始终另留一个普通验收槽。
-    full_count = sum(x['stage'] in official | {'implementation_validate'} for x in active)
-    structure_count = sum(x['stage'] == 'implementation_validate' for x in active)
+    official = {'full', 'verify', 'audit', 'implementation_official'}
+    # 回归、功能与单案时序使用探索槽；结构整案另留一个普通验收槽。
+    full_count = sum(x['stage'] in official for x in active)
+    structure_count = sum(x['stage'] == 'implementation_official' for x in active)
     explore_count = len(active) - full_count + external
     for job in sorted(pending, key=lambda x: (0 if x['stage'] in official else
                                              1 if x['stage'].startswith('implementation_') else 2,
@@ -58,7 +58,7 @@ def select_jobs(pending, active, external, workers, full_slots, memory_budget, a
             continue
         if len(active) + external + len(selected) >= workers:
             break
-        if job['stage'] == 'implementation_validate':
+        if job['stage'] == 'implementation_official':
             if structure_count >= full_slots - 1 or full_count >= full_slots:
                 continue
         elif job['stage'] in official:
@@ -71,9 +71,9 @@ def select_jobs(pending, active, external, workers, full_slots, memory_budget, a
         selected.append(job)
         reserved += job['memory_bytes']
         available -= job['memory_bytes']
-        if job['stage'] in official | {'implementation_validate'}:
+        if job['stage'] in official:
             full_count += 1
-            structure_count += job['stage'] == 'implementation_validate'
+            structure_count += job['stage'] == 'implementation_official'
         else:
             explore_count += 1
     return selected
@@ -617,6 +617,18 @@ class Pipeline:
                 try:
                     record=records[request['record_id']]
                     original,report=inputs(record,request['case'])
+                    source_root=Path(record.get('source_root') or ROOT)
+                    source_root=(source_root if source_root.is_absolute() else ROOT/source_root).resolve()
+                    if source_root != ROOT:
+                        if not (source_root.is_relative_to(ROOT/'workspace/families') or
+                                source_root.is_relative_to(ROOT/'workspace/implementation-loop')):
+                            raise ValueError('profile 来源不在受控实现族目录')
+                        source_files=source_identity_at(source_root)
+                        if key(source_files)!=record.get('source_sha256') or \
+                                digest(source_root/'vendor/official/isolation-manifest.json')!= \
+                                digest(ROOT/'vendor/official/isolation-manifest.json'):
+                            raise ValueError('profile 冻结源码或官方工具身份不匹配')
+                        self.family_sources[str(source_root)]=source_files
                     root=self.out/'profiles'/identity
                     config=root/'config.json';atomic_json(config,record['config'])
                     candidate=root/'candidate';output=root/'trace.json'
@@ -627,8 +639,8 @@ class Pipeline:
                                    '--case',request['case'],'--compare',str(report),'--out',str(output)]}
                     self.enqueue({'key':'profile-build-'+identity,'stage':'profile_build','profile_id':identity,
                         'candidate':candidate,'memory_bytes':1024**3,'followup':followup,
-                        'command':[self.python,'-m','codesign_lab.cli','build',str(config),
-                                   '--out',str(candidate),'--verify',str(original)]})
+                        'command':self.build_command(source_root,config,candidate)+
+                                   ['--verify',str(original)]})
                 except (KeyError,ValueError,OSError) as exc:
                     entry.update(status='REJECTED',error=str(exc))
                     self.notify_profile(identity)
@@ -861,9 +873,10 @@ class Pipeline:
             state_data = load(state) if state.exists() else {}
             status = state_data.get('status', 'QUEUED')
             if status in TERMINAL | {'WAITING_FOR_LAUNCH'} or status not in {
-                    'QUEUED', 'CODED', 'GRADED', 'RESEARCH_READY'}:
+                    'QUEUED', 'CODED', 'OFFICIAL_QUEUED', 'GRADED', 'RESEARCH_READY'}:
                 continue
-            phase = 'code' if status == 'QUEUED' else 'validate'
+            phase = ('code' if status == 'QUEUED' else
+                     'official' if status == 'OFFICIAL_QUEUED' else 'validate')
             stage = 'implementation_' + phase
             retry = int(state_data.get('recovery_attempts', 0))
             job_key = stage + '-' + identifier + ('-recovery' + str(retry) if retry else '')
@@ -872,7 +885,7 @@ class Pipeline:
             self.enqueue({'key': job_key, 'stage': stage,
                 'proposal_id': identifier, 'priority': -1,
                 'memory_bytes': (2 if phase == 'code' else 8) * 1024**3,
-                'timeout': 2400 if phase == 'code' else 21600,
+                'timeout': 2400 if phase == 'code' else 10800 if phase == 'official' else 7200,
                 'command': [self.python, '-m', 'codesign_lab.search.implementation',
                     '--campaign', self.out.name, '--proposal-id', identifier, '--execute',
                     '--worker', '--phase', phase, '--model', self.args.implementation_model,
@@ -883,7 +896,7 @@ class Pipeline:
 
     def completed(self, job, result):
         self.done.append(result)
-        if job['stage'] in {'implementation_code', 'implementation_validate'}:
+        if job['stage'] in {'implementation_code', 'implementation_validate', 'implementation_official'}:
             state_path = ROOT / 'workspace/implementation-loop' / self.out.name / job['proposal_id'] / 'state.json'
             state = load(state_path) if state_path.exists() else {}
             if state.get('status') == 'TARGET_QUEUED' and result['status'] == 'completed':
@@ -898,7 +911,8 @@ class Pipeline:
                     state.update(status='FAILED', updated_wall=time.time(),
                                  error='结构研究目标注入失败：' + str(receipt))
                 atomic_json(state_path, state)
-            if result['status'] == 'budget_exhausted' and state.get('status', 'QUEUED') in {'QUEUED', 'CODED'}:
+            if result['status'] == 'budget_exhausted' and state.get('status', 'QUEUED') in {
+                    'QUEUED', 'CODED', 'OFFICIAL_QUEUED'}:
                 state.update(status='BUDGET_EXHAUSTED', updated_wall=time.time(),
                     error='本批次官方整案调用预算已用尽，结构提案没有启动')
                 atomic_json(state_path, state)
@@ -909,12 +923,16 @@ class Pipeline:
                           ('；' + str(result['error']) if result.get('error') else ''))
                 atomic_json(state_path, state)
             status = state.get('status', 'MISSING')
-            if job['stage'] == 'implementation_code' and status == 'CODED' and \
+            if ((job['stage'] == 'implementation_code' and status == 'CODED') or
+                    (job['stage'] == 'implementation_validate' and status == 'OFFICIAL_QUEUED')) and \
                     result['status'] == 'completed':
                 self.process_implementations()
                 return
-            if job['stage'] == 'implementation_validate' and job.get('budget_key') and \
+            if job['stage'] == 'implementation_official' and job.get('budget_key') and \
                     not state.get('official_attempted'):
+                self.budget.reused(job['budget_key'])
+            if job['stage'] == 'implementation_validate' and job.get('budget_key') and \
+                    not state.get('case_attempted'):
                 self.budget.reused(job['budget_key'])
             if job['stage'] == 'implementation_validate' and status == 'FAILED' and \
                     result['status'] == 'completed' and \
@@ -938,11 +956,15 @@ class Pipeline:
                 # 同一提案的恢复验证可能产生新的事实；按持久任务身份区分，
                 # 恢复启动时重放相同任务仍会被触发器去重。
                 task_identity = job.get('key', job['stage'] + '-' + job['proposal_id'])
+                timing = state.get('timing')
+                if isinstance(timing, dict):
+                    timing = {name: value for name, value in timing.items()
+                              if name != 'resource_stats'}
                 self.triggers.observe('global', {'id': 'implementation-' + task_identity,
                     'observation_kind': 'implementation', 'proposal_id': job['proposal_id'],
                     'case': state.get('proposal', {}).get('case'), 'proposal_status': status,
                     'case_gain': state.get('case_gain'), 'official_score': state.get('official_score'),
-                    'timing': state.get('timing'), 'research_record': state.get('research_record'),
+                    'timing': timing, 'research_record': state.get('research_record'),
                     'target_id': state.get('target_id'),
                     'error': state.get('error') or state.get('last_error')})
                 self.pool.save()
@@ -1104,8 +1126,8 @@ class Pipeline:
                         job['queue_wait_seconds'] = max(0, time.time() - job.get('queued_wall', time.time()))
                         attempt = job.get('attempt', 1)
                         job['budget_key'] = job['key'] if attempt == 1 else job['key'] + '-attempt' + str(attempt)
-                        budget_kind = ('case' if job['stage'] == 'functional' else
-                                       'full' if job['stage'] == 'implementation_validate' else job['stage'])
+                        budget_kind = ('case' if job['stage'] in {'functional', 'implementation_validate'} else
+                                       'full' if job['stage'] == 'implementation_official' else job['stage'])
                         if job['stage'] != 'audit' and not self.budget.reserve(job['budget_key'], budget_kind):
                             self.pending.remove(job)
                             result = {'key': job['key'], 'stage': job['stage'], 'status': 'budget_exhausted', 'wall_seconds': 0}
@@ -1165,7 +1187,7 @@ class Pipeline:
                         full_slots=self.args.full_slots, external=external, memory_budget=self.memory_budget,
                         available=current_available, expired=expired),
                     'attempt_costs': attempt_costs(self.pool.state),
-                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'report','profile_build','profile','implementation_code','implementation_validate']},
+                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'report','profile_build','profile','implementation_code','implementation_validate','implementation_official']},
                     'active': [{'key': k, 'stage': x['job']['stage'], 'pid': x['pid'],
                         'start_ticks': load(Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json'))['start_ticks'] if Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json').exists() else None,
                         'queue_wait_seconds': x['job'].get('queue_wait_seconds'),

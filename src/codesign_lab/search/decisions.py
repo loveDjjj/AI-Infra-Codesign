@@ -64,11 +64,10 @@ def apply_decision(pool,triggers,decision):
     pending=triggers.state['lanes'].get(lane,{}).get('pending')
     if not pending or pending['decision_id']!=identifier:raise ValueError('决策没有对应待分析请求')
     records=read();valid_ids={r['id'] for r in records}
-    # 结构验证结果先保存在批次状态；只允许引用本次请求实际看到的观测，
-    # 并把其内容随决策固化，避免工作区清理后丢失证据。
+    # 结构验证结果先保存在批次状态；允许长期会话引用同一 lane 先前的真实观测，
+    # 并把被引用的内容随决策固化，避免工作区清理后丢失证据。
     observed={item['id']: copy.deepcopy(item)
-              for item in triggers.state['lanes'][lane].get('observations', [])
-              if item.get('id') in pending.get('observation_ids', [])}
+              for item in triggers.state['lanes'][lane].get('observations', [])}
     valid_evidence=valid_ids | set(observed)
     commands=[];seen_targets=set()
     for raw in decision['new_targets']:

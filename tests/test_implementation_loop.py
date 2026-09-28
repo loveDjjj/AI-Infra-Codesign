@@ -120,6 +120,39 @@ class ImplementationChecks(unittest.TestCase):
             self.assertEqual(module.digest(destination / 'data/releases/joint28/hardware.json'),
                              module.digest(ROOT / 'data/releases/joint28/hardware.json'))
 
+    def test_official_phase_only_starts_after_single_case_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/test-campaign'
+            snapshot = root / 'snapshot'
+            state_path = root / 'workspace/implementation-loop/test-campaign/proposal/state.json'
+            state_path.parent.mkdir(parents=True)
+            snapshot.mkdir()
+            expected = {'hardware.json': 'hw', 'programs/M1_P1.asm': 'p1',
+                        'programs/M2_D1.asm': 'd1'}
+            state_path.write_text(json.dumps({'status': 'OFFICIAL_QUEUED',
+                'snapshot': str(snapshot), 'artifact_sha256': expected}))
+            item = {'id': 'proposal', 'case': 'M1_P1'}
+            def grade(_snapshot, argv, _label, **_kwargs):
+                report = Path(argv[-1]);report.parent.mkdir(parents=True)
+                report.write_text(json.dumps({'experimental_score': 50000}))
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'artifacts', return_value=expected), \
+                 patch.object(module, 'verify_official'), \
+                 patch.object(module, 'verify_snapshot_official'), \
+                 patch.object(module, 'interpreter', return_value='/test/python'), \
+                 patch.object(module, 'run', side_effect=grade) as run, \
+                 patch.object(module.ImplementationLoop, 'finish_graded',
+                              side_effect=lambda _item, state, _save: state):
+                loop = module.ImplementationLoop(campaign)
+                self.assertEqual(loop.process(item, phase='validate')['status'], 'OFFICIAL_QUEUED')
+                run.assert_not_called()
+                result = loop.process(item, phase='official')
+            self.assertEqual(result['status'], 'GRADED')
+            self.assertTrue(result['official_attempted'])
+            self.assertEqual(result['official_score'], 50000)
+            run.assert_called_once()
+
     def test_coder_uses_new_session_without_locking_global_planner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -322,6 +355,23 @@ class ImplementationChecks(unittest.TestCase):
             self.assertTrue((origin / exported[0]['report']).is_file())
             self.assertEqual(exported[0]['candidate'], 'data/evidence/research/research-structure-1/candidate')
             self.assertIsNone(rows[0]['score'])
+
+            power_report = snapshot / 'workspace/power-estimate.json'
+            power_report.write_text(json.dumps({'hardware': {}, 'program_sha256': {
+                'M1_P1': hashlib.sha256(b'P1').hexdigest()}, 'cases': {'M1_P1': {
+                'functional_passed': True, 'timing': {'cycles': 99,
+                    'peak_window_power_w': 20.1, 'resource_stats': {'large': 'raw'}}}}}))
+            power_item = dict(item, id='structure-power')
+            with patch.object(module, 'origin_root', return_value=origin):
+                power_id = module.record_research_candidate(
+                    snapshot, power_item, candidate, power_report, 0.01, admission=False)
+            power_record = next(row for row in
+                (json.loads(line) for line in (origin / 'data/experiments.jsonl').read_text().splitlines())
+                if row['id'] == power_id)
+            self.assertIs(power_record['eligible'], False)
+            self.assertIs(power_record['research_admission'], False)
+            self.assertNotIn('resource_stats', power_record['cases']['M1_P1']['timing'])
+            self.assertTrue((origin / power_record['report']).is_file())
 
     def test_next_epoch_only_seeds_affected_case_neighborhood(self):
         with tempfile.TemporaryDirectory() as directory:

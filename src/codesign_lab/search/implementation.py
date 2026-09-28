@@ -645,8 +645,9 @@ def snapshot_epoch(snapshot: Path):
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
 
 
-def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estimate: Path, gain: float):
-    """保存正确但尚未达到正式门槛的结构事实，供同源码后续搜索引用。"""
+def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estimate: Path,
+                              gain: float, *, admission=True):
+    """保存有真实单案结果的结构事实；超功耗候选仅供分析和诊断。"""
     from ..evaluation.pipeline import compact_cases
     import datetime
     identifier = 'research-' + item['id']
@@ -665,9 +666,9 @@ def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estim
               'report': str(estimate.relative_to(snapshot)),
               'candidate': str(candidate.relative_to(snapshot)),
               'artifact_sha256': artifacts(candidate), 'case_gain': gain,
-              'eligible': None, 'score': None, 'audited': False,
+              'eligible': None if admission else False, 'score': None, 'audited': False,
               'reproduction': 'record_only', 'source_epoch': snapshot_epoch(snapshot),
-              'parent_decision': item['decision_id'], 'research_admission': True,
+              'parent_decision': item['decision_id'], 'research_admission': admission,
               'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat()}
     ledger = snapshot / 'data/experiments.jsonl'
     with (snapshot / 'data/.experiments.lock').open('a') as lock:
@@ -844,8 +845,23 @@ class ImplementationLoop:
                  last_error=type(exc).__name__ + ': ' + str(exc))
         return state
 
+    def run_official(self, item, state, save):
+        """单案证据已固定后才占用正式验收槽位。"""
+        snapshot = Path(state['snapshot'])
+        candidate = snapshot / 'workspace/implementation-builds/candidate'
+        report = snapshot / 'workspace/implementation-reports/official.json'
+        if artifacts(candidate) != state['artifact_sha256']:
+            raise ValueError('进入整案前候选产物身份发生变化')
+        verify_official()
+        verify_snapshot_official(snapshot)
+        save('OFFICIAL', official_attempted=True)
+        run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'run', str(candidate),
+            '--level', 'full', '--out', str(report)], 'official', timeout=7200)
+        save('GRADED', report=str(report), official_score=load(report).get('experimental_score'))
+        return self.finish_graded(item, state, save)
+
     def process(self, item: dict, *, phase='all'):
-        if phase not in {'all', 'code', 'validate'}:
+        if phase not in {'all', 'code', 'validate', 'official'}:
             raise ValueError('未知结构任务阶段')
         state_path = self.directory / item['id'] / 'state.json'
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -856,7 +872,12 @@ class ImplementationLoop:
             return state
         if phase == 'validate' and state['status'] == 'QUEUED':
             return state
-        if state['status'] not in {'QUEUED', 'CODED', 'GRADED', 'RESEARCH_READY', 'WAITING_FOR_LAUNCH'}:
+        if phase == 'official' and state['status'] != 'OFFICIAL_QUEUED':
+            return state
+        if state['status'] == 'OFFICIAL_QUEUED' and phase not in {'all', 'official'}:
+            return state
+        if state['status'] not in {'QUEUED', 'CODED', 'OFFICIAL_QUEUED', 'GRADED',
+                                  'RESEARCH_READY', 'WAITING_FOR_LAUNCH'}:
             # 崩溃时不重放可能仍在运行的同一 AI 会话或昂贵官方调用。
             return state
         def save(status, **fields):
@@ -875,6 +896,12 @@ class ImplementationLoop:
                 return state
         if state['status'] == 'RESEARCH_READY':
             return self.finish_research(item, state, save)
+        if state['status'] == 'OFFICIAL_QUEUED':
+            try:
+                return self.run_official(item, state, save)
+            except Exception as exc:
+                save('FAILED', error=type(exc).__name__ + ': ' + str(exc))
+                return state
         if not campaign_generator_unchanged(self.campaign):
             raise ValueError('提案所属生成器源码已改变')
         verify_official()
@@ -958,7 +985,7 @@ class ImplementationLoop:
                 raise ValueError('候选改变硬件或非目标 ASM')
             if after['programs/' + item['case'] + '.asm'] == before['programs/' + item['case'] + '.asm']:
                 raise ValueError('结构开关没有改变目标 ASM')
-            save('FUNCTIONAL', artifact_sha256=after)
+            save('FUNCTIONAL', artifact_sha256=after, case_attempted=True)
             functional = snapshot / 'workspace/implementation-reports/functional.json'
             run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'run', str(candidate), '--level',
                 'functional', '--case', item['case'], '--seed', '7', '--seed', '123', '--out', str(functional)],
@@ -978,7 +1005,14 @@ class ImplementationLoop:
             baseline_timing = load(snapshot / 'data/releases' / source_release / 'local-grade.json')['cases'][item['case']]['timing']
             gain = (baseline_timing['cycles'] - timing['cycles']) / baseline_timing['cycles']
             if timing['peak_window_power_w'] > 20:
-                save('REJECTED', reason='单案峰值功耗超限', case_gain=gain, timing=timing)
+                research_record = record_research_candidate(
+                    snapshot, item, candidate, estimate, gain, admission=False)
+                save('REJECTED', reason='单案峰值功耗超限', case_gain=gain,
+                     research_record=research_record,
+                     timing={'cycles': timing['cycles'],
+                             'peak_window_power_w': timing['peak_window_power_w'],
+                             'hbm_read_bytes': timing.get('hbm_read_bytes'),
+                             'hbm_write_bytes': timing.get('hbm_write_bytes')})
                 return state
             if gain < self.min_case_gain:
                 research_record = record_research_candidate(snapshot, item, candidate, estimate, gain)
@@ -987,14 +1021,11 @@ class ImplementationLoop:
                      timing={'cycles': timing['cycles'],
                              'peak_window_power_w': timing['peak_window_power_w']})
                 return self.finish_research(item, state, save)
-            save('OFFICIAL', case_gain=gain, official_attempted=True,
+            save('OFFICIAL_QUEUED', case_gain=gain, session_id=session_id,
                  timing={'cycles': timing['cycles'], 'peak_window_power_w': timing['peak_window_power_w']})
-            report = snapshot / 'workspace/implementation-reports/official.json'
-            run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'run', str(candidate),
-                '--level', 'full', '--out', str(report)], 'official', timeout=7200)
-            save('GRADED', report=str(report), official_score=load(report).get('experimental_score'),
-                 session_id=session_id)
-            return self.finish_graded(item, state, save)
+            if phase == 'validate':
+                return state
+            return self.run_official(item, state, save)
         except Exception as exc:
             save('FAILED', error=type(exc).__name__ + ': ' + str(exc))
             return state
@@ -1021,7 +1052,7 @@ def main(argv=None):
     parser.add_argument('--retry-failed', action='store_true',
                         help='恢复已完成编码但在默认配置复现阶段失败的提案')
     parser.add_argument('--worker', action='store_true', help='由统一流水线准入的单提案执行者')
-    parser.add_argument('--phase', choices=['all', 'code', 'validate'], default='all')
+    parser.add_argument('--phase', choices=['all', 'code', 'validate', 'official'], default='all')
     parser.add_argument('--handoff-only', action='store_true', help='只等待旧批次锁并交接已验证的新版本')
     parser.add_argument('--min-case-gain', type=float, default=.002)
     parser.add_argument('--min-score-gain', type=float, default=100)

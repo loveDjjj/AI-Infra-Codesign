@@ -77,13 +77,12 @@ class DecisionChecks(unittest.TestCase):
                 apply_decision(self.pool,self.triggers,self.decision)
         self.assertIsNotNone(self.triggers.lane('p1_attention')['pending'])
 
-    def test_structural_observation_can_be_cited_and_is_preserved(self):
+    def test_earlier_structural_observation_can_be_cited_and_is_preserved(self):
         self.decision['new_targets'] = []
         observed = {'id': 'implementation-example', 'observation_kind': 'implementation',
                     'proposal_status': 'RESEARCH_READY', 'case_gain': 0.01}
         lane = self.triggers.lane('p1_attention')
         lane['observations'].append(observed)
-        lane['pending']['observation_ids'] = [observed['id']]
         self.decision['conclusions'] = [{'claim': '结构测试已有有效增益', 'confidence': 0.9,
                                         'evidence_ids': [observed['id']]}]
         with patch('codesign_lab.search.decisions.read', return_value=self.records), \
