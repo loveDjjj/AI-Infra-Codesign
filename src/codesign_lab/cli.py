@@ -7,6 +7,7 @@ def main():
     p=sub.add_parser('build');p.add_argument('config',type=Path);p.add_argument('--out',type=Path,required=True);p.add_argument('--verify',type=Path)
     p=sub.add_parser('run');p.add_argument('candidate',type=Path);p.add_argument('--level',choices=['functional','estimate','both','full'],default='functional');p.add_argument('--case',choices=['M1_P1','M2_D1'],action='append');p.add_argument('--seed',type=int,action='append');p.add_argument('--out',type=Path,required=True);p.add_argument('--no-cache',action='store_true')
     sub.add_parser('report')
+    p=sub.add_parser('dashboard');p.add_argument('--host',default='127.0.0.1');p.add_argument('--port',type=int,default=8765)
     p=sub.add_parser('pipeline');p.add_argument('config',type=Path);p.add_argument('--execute',action='store_true');p.add_argument('--resume',action='store_true')
     p=sub.add_parser('implementation-loop');p.add_argument('--campaign',required=True);p.add_argument('--execute',action='store_true');p.add_argument('--watch',action='store_true');p.add_argument('--proposal-id');p.add_argument('--retry-failed',action='store_true');p.add_argument('--max-proposals',type=int,default=2);p.add_argument('--min-case-gain',type=float,default=.002);p.add_argument('--min-score-gain',type=float,default=100);p.add_argument('--model',default='gpt-6-astra');p.add_argument('--reasoning-effort',default='medium')
     p=sub.add_parser('family-restore');p.add_argument('record_id');p.add_argument('--out',type=Path,required=True)
@@ -25,6 +26,10 @@ def main():
     p=sub.add_parser('clean');p.add_argument('--dry-run',action='store_true',required=True)
     p=sub.add_parser('profile');p.add_argument('candidate',type=Path);p.add_argument('--case',required=True);p.add_argument('--compare',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     args=parser.parse_args()
+    if args.command=='dashboard':
+        from .dashboard import serve
+        serve(args.host,args.port)
+        return 0
     if args.command=='pipeline':
         from .search.settings import arguments
         from .search.pipeline import main as pipeline_main

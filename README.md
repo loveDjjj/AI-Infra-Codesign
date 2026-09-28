@@ -2,7 +2,7 @@
 
 本仓库实现课程工作负载 v0.7 的硬件与程序协同设计。`vendor/official/` 是冻结的官方评估器；最终正确性、周期、功耗与分数以它生成的原始报告为准。
 
-**截至 2026-09-28 的已知状态**：实验账本最高已审计整案为 `official-1790581630771528243`，**49,283.865188** 分。它属于隔离生成器源码 epoch，原件在本机 `data/releases/`；根目录 `configs/best.yaml` 和 `data/state.json` 的已晋升指针仍指向可由当前根目录源码复现的 joint28（47,957.06 分）。两者不能混用。最近的第四个源码批次已结束，当前没有运行中的流水线。网站提交仍关闭；GitHub 提交也不代表课程提交。
+**截至 2026-09-28 的已知状态**：实验账本最高已审计整案为跨源码组合 `pair-w2-throttle-highest-full-1790611520350037544`，**49,420.082119** 分，原件在本机 `data/releases/`；根目录 `configs/best.yaml` 和 `data/state.json` 的已晋升指针仍指向可由当前根目录源码复现的 joint28（47,957.06 分）。两者不能混用。运行中任务以实时看板核对进程身份为准。网站提交仍关闭；GitHub 提交也不代表课程提交。
 
 ## 从哪里开始
 
@@ -20,13 +20,14 @@
 ./lab build configs/best.yaml --out workspace/builds/current
 ./lab run workspace/builds/current --level functional --out workspace/evaluations/functional.json
 ./lab report
+./lab dashboard --host 0.0.0.0 --port 8765      # 实时看板；浏览器打开 http://服务器地址:8765/
 ./lab pipeline configs/pipeline.yaml                 # 只检查计划
 ./lab pipeline configs/pipeline.yaml --execute       # 显式执行
 ./lab family-restore official-1790581630771528243 --out workspace/families/official-1790581630771528243  # 恢复已审计实现族
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
 ```
 
-`docs/dashboard.html` 是 `./lab report` 生成的本地快照，不入 Git；浏览器直接打开即可。它会显示候选、整案和测量阶段；资源忙碌比例只能用于提出瓶颈假设，不能当作因果等待证明。
+`./lab dashboard` 提供实时只读页面，每 5 秒更新最佳已审计分数、P1/D1 周期趋势和当前任务；它不装载大型历史报告。默认仅监听 `127.0.0.1`，跨机器查看时按上例指定 `--host 0.0.0.0`。`./lab report` 仍可生成离线快照，但不会实时更新。
 
 ## 三种保存边界
 

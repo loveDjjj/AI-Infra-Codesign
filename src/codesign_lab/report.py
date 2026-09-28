@@ -1,142 +1,172 @@
-import json,html
-from .config import ROOT,load,digest
-from .records import read,state
-from .evaluation.profile import summarize,stage_pressure,stage_labels
+"""生成轻量只读看板：最佳指标、优化趋势和真实在途任务。"""
+import html
+import json
+from datetime import datetime, timezone
+
+from .config import ROOT, load
+from .records import read, state
+from .search.status import process_identity
+
+_ledger_cache=(None,None)
+
+
+def _records_cached():
+    """账本未变化时不在每次浏览器轮询中重读大型历史记录。"""
+    global _ledger_cache
+    path=ROOT/'data/experiments.jsonl'
+    identity=(path.stat().st_mtime_ns,path.stat().st_size) if path.exists() else None
+    if _ledger_cache[1] is None or _ledger_cache[0]!=identity:
+        _ledger_cache=(identity,read())
+    return _ledger_cache[1]
+
+
+def _text(value):
+    return html.escape(str(value if value is not None else '—'), quote=True)
+
+
+def _number(value, digits=2):
+    return f'{value:,.{digits}f}' if isinstance(value, (int, float)) else '—'
+
+
+def _series(rows, field, *, lower=False):
+    """只展示已审计合格整案的累计最佳值，不把局部结果画成总分。"""
+    values=[]
+    best=None
+    for row in rows:
+        value=field(row)
+        if not isinstance(value, (int, float)):
+            continue
+        best=min(best,value) if lower and best is not None else max(best,value) if best is not None else value
+        values.append(float(best))
+    return values
+
+
+def _chart(title, values, unit='', color='#58c7ff'):
+    if not values:
+        return f'<section class="chart"><h2>{_text(title)}</h2><p>尚无已审计合格整案数据</p></section>'
+    low=min(values);high=max(values);span=max(high-low,1)
+    points=' '.join(f'{30+i*620/max(len(values)-1,1):.1f},{155-(value-low)*125/span:.1f}'
+                    for i,value in enumerate(values))
+    circles=''.join(f'<circle cx="{30+i*620/max(len(values)-1,1):.1f}" '
+                    f'cy="{155-(value-low)*125/span:.1f}" r="3" fill="{color}"/>'
+                    for i,value in enumerate(values))
+    return (f'<section class="chart"><h2>{_text(title)}</h2>'
+            f'<svg viewBox="0 0 680 190" role="img" aria-label="{_text(title)}趋势图">'
+            '<path d="M30 160H650" stroke="#49607a"/>'
+            f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="3"/>{circles}'
+            f'<text x="30" y="181">起点 {_text(_number(values[0],0))}{_text(unit)}</text>'
+            f'<text x="650" y="181" text-anchor="end">当前 {_text(_number(values[-1],0))}{_text(unit)}</text>'
+            '</svg></section>')
+
+
+def _active_tasks():
+    """旧状态文件不能证明进程仍在运行，逐个核对 PID 启动身份。"""
+    tasks=[]
+    for path in (ROOT/'workspace/pipeline').glob('*/status.json'):
+        try:
+            status=load(path)
+            for job in status.get('active',[]):
+                if process_identity(job['pid'],job.get('start_ticks'))!='身份匹配，生成时存活':
+                    continue
+                tasks.append({'campaign':path.parent.name,'stage':job.get('stage'),
+                    'key':job.get('key'),'seconds':job.get('wall_seconds'),
+                    'rss_mib':(job.get('peak_rss_bytes') or 0)/1048576})
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return tasks
+
+
+def _latest_ai():
+    path=ROOT/'data/decisions.jsonl'
+    if not path.is_file():
+        return None
+    for line in reversed(path.read_text().splitlines()):
+        if line.strip():
+            try:
+                row=json.loads(line)
+                return {'summary':row.get('decision',{}).get('summary'),
+                        'lane':row.get('lane'),'id':row.get('id')}
+            except ValueError:
+                continue
+    return None
+
+
+def live_snapshot():
+    """HTTP 看板只返回当前指标、短趋势和实时任务，不传历史原件。"""
+    rows=_records_cached()
+    audited=sorted((row for row in rows if row.get('scope')=='full' and
+        row.get('audited') is True and row.get('eligible') is True and
+        isinstance(row.get('score'),(int,float))),key=lambda row:row.get('timestamp',''))
+    best=max(audited,key=lambda row:row['score']) if audited else None
+    points=[];best_score=None;best_p1=None;best_d1=None
+    for row in audited:
+        score=row['score'];best_score=max(best_score,score) if best_score is not None else score
+        cases=row.get('cases',{})
+        p1=cases.get('M1_P1',{}).get('timing',{}).get('cycles')
+        d1=cases.get('M2_D1',{}).get('timing',{}).get('cycles')
+        if isinstance(p1,(int,float)):best_p1=min(best_p1,p1) if best_p1 is not None else p1
+        if isinstance(d1,(int,float)):best_d1=min(best_d1,d1) if best_d1 is not None else d1
+        points.append({'id':row['id'],'score':best_score,'p1_cycles':best_p1,
+                       'd1_cycles':best_d1,'timestamp':row.get('timestamp')})
+    cases=best.get('cases',{}) if best else {}
+    def metric(case,name):
+        return cases.get(case,{}).get('timing',{}).get(name)
+    return {'updated_at':datetime.now(timezone.utc).isoformat(),
+        'best':{'id':best['id'],'score':best['score'],
+                'p1_cycles':metric('M1_P1','cycles'),'d1_cycles':metric('M2_D1','cycles'),
+                'p1_power_w':metric('M1_P1','peak_window_power_w'),
+                'd1_power_w':metric('M2_D1','peak_window_power_w')} if best else None,
+        'promoted_record':state().get('promoted_record'),
+        'trend':points,'tasks':_active_tasks(),'ai':_latest_ai()}
+
 
 def generate():
-    (ROOT/'workspace/reports').mkdir(parents=True,exist_ok=True)
-    records=read();profiles={}
-    for record in records:
-        profiles[record['id']]=record.get('profile',{})
-        path=Path_report(record.get('report'))
-        if path and path.exists() and (not record.get('profile') or record['id'] in [state().get('promoted_record'),state().get('archived_release')]):
-            report=load(path)
-            profiles[record['id']]={case:summarize(value['timing']) for case,value in report.get('cases',{}).items() if 'timing' in value and 'resource_stats' in value['timing']}
-            if record['id'] not in [state().get('promoted_record'),state().get('archived_release')]:
-                for info in profiles[record['id']].values():info['timeline']=None
-    for case,prefix in [('M1_P1','p1'),('M2_D1','d1')]:
-        file=ROOT/'data/releases/joint28'/f'{prefix}-profile.json'
-        if file.exists():
-            traced=load(file);target=next((key for key in profiles if key.startswith('joint28_v072')),None)
-            if target:
-                profiles[target][case]['operator_spans']=[stage|stage_labels(stage)|{'pressure_estimate':stage_pressure(stage,profiles[target][case].get('timeline'))} for stage in traced.get('operator_spans',[])]
-                profiles[target][case]['sync_stages']=traced.get('stages',[])
-                profiles[target][case]['stage_status']='Measured event trace, complete timing identical to original grade'
-    for record in records:
-        for case,evidence in record.get('profile_evidence',{}).items():
-            file=Path_report(evidence.get('path'));original=Path_report(record.get('report'))
-            if not file or not file.exists() or digest(file)!=evidence.get('sha256') or not original or not original.exists():continue
-            traced=load(file)
-            if traced.get('complete_timing_identical') is not True or traced.get('compare_sha256')!=digest(original):continue
-            measured=summarize(traced['timing'])
-            measured['operator_spans']=[stage|stage_labels(stage)|{'pressure_estimate':stage_pressure(stage,measured.get('timeline'))}
-                for stage in traced.get('operator_spans',[])]
-            measured['source_evidence']=evidence
-            measured['stage_status']='实测事件轨迹，原报告时序一致，证据哈希已核对'
-            if record['id'] not in [state().get('promoted_record'),state().get('archived_release')]:measured['timeline']=None
-            profiles[record['id']][case]=measured
-    host=[]
-    for file in sorted((ROOT/'workspace').rglob('*.host.latest.json')):
-        sample=load(file);log=file.with_name(file.name.replace('.latest.json','.jsonl'))
-        last=load_tail(log) if log.exists() else {}
-        sample['completed']=last.get('event')=='process_gone' or sample.get('state')=='Z'
-        host.append({'experiment':file.stem,'sample':sample,'source':'host process tree, not simulated chip utilization'})
-    campaigns=[]
-    for metadata in sorted((ROOT/'workspace/search').glob('*/campaign.json')):
-        directory=metadata.parent
-        status_path=directory/'eval-jobs/status.json'
-        if not status_path.exists():status_path=directory/'build-jobs/status.json'
-        summary_path=directory/'summary.json'
-        campaigns.append({'id':directory.name,'status':load(status_path) if status_path.exists() else {},
-                          'summary':load(summary_path) if summary_path.exists() else None})
-    pipelines=[]
-    for runtime_file in sorted((ROOT/'workspace/pipeline').glob('*/state.json')):
-        runtime=load(runtime_file);directory=runtime_file.parent
-        status_file=directory/'status.json'
-        status=load(status_file) if status_file.exists() else {}
-        from .search.status import process_identity, attempt_costs, target_summary
-        for process in status.get('active', []):
-            process['identity_status']=process_identity(process['pid'],process.get('start_ticks'))
-        targets=[target_summary(identifier,entry) for identifier,entry in runtime.get('targets',{}).items()]
-        lanes=[{'lane':name,'pending':entry.get('pending'),
-                'last_analysis_wall':entry.get('last_analysis_wall'),
-                'running':bool(entry.get('running_job')),
-                'recovery_blocked':entry.get('recovery_blocked',False),
-                'last_error':entry.get('last_error'),
-                'manual_requested':bool(entry.get('manual_request')),
-                'independent_observations':len(entry.get('observations',[]))}
-               for name,entry in runtime.get('analysis',{}).get('lanes',{}).items()]
-        pipelines.append({'id':directory.name,'status':status,'targets':targets,'lanes':lanes,
-            'attempt_costs':attempt_costs(runtime),
-            'decisions':len(runtime.get('applied_decisions',{})),
-            'updated_wall':status_file.stat().st_mtime if status_file.exists() else runtime_file.stat().st_mtime})
-    implementations=[]
-    for path in sorted((ROOT/'workspace/implementation-loop').glob('*/*/state.json')):
-        item=load(path)
-        implementations.append({'campaign':path.parents[1].name,'id':item.get('proposal',{}).get('id'),
-            'case':item.get('proposal',{}).get('case'),'status':item.get('status'),
-            'case_gain':item.get('case_gain'),'official_score':item.get('official_score'),
-            'target_id':item.get('target_id'), 'recovery_attempts':item.get('recovery_attempts',0),
-            'error':item.get('error') or item.get('last_error') or item.get('reason'),
-            'updated_wall':item.get('updated_wall')})
-    decision_path=ROOT/'data/decisions.jsonl'
-    decisions=[]
-    if decision_path.is_file():
-        for line in decision_path.read_text().splitlines():
-            if line.strip():
-                row=json.loads(line);decision=row.get('decision',{})
-                decisions.append({'id':row.get('id'),'lane':row.get('lane'),
-                    'summary':decision.get('summary'),'conclusions':decision.get('conclusions',[]),
-                    'evidence_ids':list(row.get('evidence_snapshot',{})),
-                    'targets_added':len(decision.get('new_targets',[]))})
-    data={'pipelines':pipelines,'implementations':implementations,'host':host,'campaigns':campaigns,'records':[{key:value for key,value in record.items() if key!='profile'} for record in records],'state':state(),'profiles':profiles,'decisions':decisions[-30:]}
-    payload=json.dumps(data,ensure_ascii=False).replace('<',r'\u003c')
-    page=TEMPLATE.replace('__DATA__',payload)
-    target=ROOT/'docs/dashboard.html';target.write_text(page)
-    (ROOT/'workspace/reports/profile-summary.json').write_text(json.dumps({key:{case:{k:v for k,v in info.items() if k!='timeline'} for case,info in cases.items()} for key,cases in profiles.items()},ensure_ascii=False,indent=2)+'\n')
-    return {'dashboard':str(target),'records':len(records),'profiles':len(profiles)}
-def load_tail(path):
-    lines=path.read_text().splitlines()
-    return json.loads(lines[-1]) if lines else {}
-def Path_report(value):
-    from pathlib import Path
-    if not value:return None
-    path=Path(value);return path if path.is_absolute() else ROOT/path
-
-TEMPLATE = r'''<!doctype html><html lang="zh"><meta charset="utf-8"><title>Codesign Lab</title>
-<style>body{font:15px system-ui;background:#0b1424;color:#dce6f5;margin:24px;max-width:1400px}h1,h2{color:#90c7ff}section{background:#162239;padding:20px;margin:16px 0;border-radius:12px}select,input{padding:8px;background:#243854;color:white;border:1px solid #668}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #354561}.cards{display:flex;gap:20px;flex-wrap:wrap}.card{padding:12px;background:#243854;border-radius:8px}button{cursor:pointer;padding:6px}canvas{width:100%;height:270px}.note{color:#ffc47c}pre{white-space:pre-wrap;max-height:450px;overflow:auto}tr:hover{background:#243854}</style>
-<h1>AI Infra · 研究工作台</h1><p>配置定义设计，账本保存事实；测量、估计与假设分开显示。页面由 ./lab report 生成。</p>
-<section><h2>当前状态</h2><div class="cards" id="status"></div></section>
-<section><h2>动态流水线与验收</h2><p>生成时快照；更新时刻是状态文件时间，旧状态不能证明进程仍然存活。预测与正式评分分别记录。</p><table><thead><tr><th>流水线</th><th>总槽位 / 验收预留</th><th>活跃 / 排队</th><th>冷 case / full 已使用</th><th>目标 / 决策</th><th>状态更新时间</th></tr></thead><tbody id="pipelines"></tbody></table></section>
-<section><h2>AI 结果整理</h2><p>来自已校验的决策账本；AI 结论是研究判断，实测事实仍以实验记录和官方报告为准。</p><table><thead><tr><th>决策 / lane</th><th>结果摘要</th><th>证据与后续目标</th></tr></thead><tbody id="aiDecisions"></tbody></table></section>
-<section><h2>隔离结构实验</h2><p>AI 提案进入统一调度；正确且功耗合格的新结构可在原批次继续有限搜索。正式成绩仍由冻结官方整案和审计决定。失败记录不等于性能观测。</p><table><thead><tr><th>批次 / 提案</th><th>案例</th><th>关卡 / 续搜目标</th><th>单案收益</th><th>官方分数</th><th>恢复次数 / 失败原因</th></tr></thead><tbody id="implementations"></tbody></table></section>
-<section><h2>主控资源、等待与重试</h2><p>主机调度实测；等待原因是准入条件，不是模拟芯片 stall。累计任务秒可并行重叠，不等于墙钟时间。</p><table><thead><tr><th>流水线</th><th>内存预算 / 预留 / 可准入 MiB</th><th>已记录尝试 / 累计秒 / 重试秒</th><th>恢复估计次数</th></tr></thead><tbody id="pipelineCosts"></tbody></table><h3>排队任务</h3><table><thead><tr><th>流水线 / 任务</th><th>阶段</th><th>等待秒</th><th>准入等待原因</th></tr></thead><tbody id="pipelineQueue"></tbody></table><h3>评估监督进程</h3><table><thead><tr><th>流水线 / 任务</th><th>阶段</th><th>PID / 身份</th><th>准入等待秒</th><th>运行秒 / RSS MiB</th></tr></thead><tbody id="pipelineProcesses"></tbody></table></section>
-<section><h2>目标采样与反馈</h2><p>提案来源是后端接口记录；TPE 启动期仍可能是随机提案。缓存反馈不计独立性能观测，终态恢复检查不代表采样收益。</p><table><thead><tr><th>流水线 / 目标</th><th>采样 / 状态</th><th>完成 / 提出 / 预算</th><th>提案来源</th><th>待反馈 / 后端任务</th><th>本轮独立观测 / 历史先验 / 拒绝 / 待处理</th></tr></thead><tbody id="samplingTargets"></tbody></table></section><section><h2>分析请求与研究方向</h2><p>待分析请求不等于真实 AI 已执行；离线决策用于链路验证。</p><table><thead><tr><th>流水线 / lane</th><th>独立观测</th><th>待分析原因</th><th>执行 / 恢复状态</th><th>当前假设</th></tr></thead><tbody id="analysisLanes"></tbody></table></section>
-<section><h2>并行搜索批次</h2><p>生成时的快照；运行状态实时文件位于各批次 eval-jobs/status.json。候选单案结果不是整包得分。</p><table><thead><tr><th>批次</th><th>进程上限</th><th>运行 / 排队 / 完成</th><th>内存预算 MiB</th><th>批次耗时 s</th></tr></thead><tbody id="campaigns"></tbody></table></section>
-<section><h2>实验账本</h2><input id="query" placeholder="搜索实验名 / 范围"><table><thead><tr><th>实验</th><th>范围</th><th>得分</th><th>合格</th><th>主机秒</th></tr></thead><tbody id="rows"></tbody></table></section>
-<section><h2>芯片资源与瓶颈</h2><select id="run"></select> <select id="case"><option>M1_P1</option><option>M2_D1</option></select> <select id="sm"><option value="shared">共享资源</option></select><div id="metrics" class="cards"></div><p class="note" id="wait"></p><canvas id="heat" width="1280" height="270"></canvas><p>热图为资源服务时间占比，可并行重叠。分箱热图不能替代精确功耗门槛。</p><table><thead><tr><th>实体</th><th>资源</th><th>忙碌比例</th><th>服务周期</th></tr></thead><tbody id="resources"></tbody></table><h3>算子阶段</h3><p id="stageNote"></p><table><thead><tr><th>阶段 / 层 / 步</th><th>算子 / 名称</th><th>开始</th><th>结束</th><th>跨度</th><th>资源压力推算</th></tr></thead><tbody id="stages"></tbody></table><details><summary>完整配置与证据 / AI 可读分析</summary><pre id="detail"></pre></details></section>
-<section><h2>评估主机监控</h2><p>CPU、RSS、进程状态、等待通道和 I/O 来自评测进程树；仅是生成时快照，重新执行 ./lab report 刷新。</p><table><thead><tr><th>任务</th><th>采样时间</th><th>CPU 单核 %</th><th>RSS MiB</th><th>状态 / 等待通道</th><th>I/O 读写增量字节</th></tr></thead><tbody id="hosts"></tbody></table></section><section><h2>搜索与下一步</h2><p>搜索空间生成、去重、合法性剪枝与评测分别实现。面积是硬剪枝；历史功耗或低利用率只影响探索方向。搜索支持显式执行；动态流水线按预算组合入围候选，并通过冻结官方通道验收。网站上传保持关闭。</p><p>MILP 尚未接入：应先明确整数决策变量、可证明的约束和局部目标，再用真实子问题对比求解速度与最优间隙。不能用资源忙碌比例伪造完整性能目标。</p></section>
-<script type="application/json" id="data">__DATA__</script><script>
-const D=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id),fmt=x=>x==null||(typeof x==='number'&&!Number.isFinite(x))?'未提供':typeof x==='number'?x.toLocaleString('en-US',{maximumFractionDigits:2}):String(x),esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const highest=D.records.filter(r=>r.audited&&r.eligible&&r.score!=null).sort((a,b)=>b.score-a.score)[0];
-$('status').innerHTML=[['最高已审计',highest?.id],['已晋升',D.state.promoted_record],['已归档版本',D.state.archived_release],['已提交（有收据）',D.state.submitted_release]].map(([label,value])=>`<div class="card">${label}<br><b>${esc(value||'未设置')}</b></div>`).join('');
-$('campaigns').innerHTML=(D.campaigns||[]).map(c=>`<tr><td>${esc(c.id)}</td><td>${fmt(c.status.workers_limit)}</td><td>${fmt(c.status.active?.length)} / ${fmt(c.status.pending)} / ${fmt(c.status.completed)}</td><td>${fmt(c.status.memory_budget_bytes/1024/1024)}</td><td>${fmt(c.summary?.wall_seconds??c.status.elapsed_seconds)}</td></tr>`).join('');
-$('pipelines').innerHTML=(D.pipelines||[]).map(p=>`<tr><td>${esc(p.id)}</td><td>${fmt(p.status.workers_limit)} / ${fmt(p.status.full_slots)}</td><td>${fmt(p.status.active?.length)} / ${fmt(Object.values(p.status.pending||{}).reduce((a,b)=>a+b,0))}</td><td>${fmt(p.status.budget?.used?.case)} / ${fmt(p.status.budget?.used?.full)}</td><td>${fmt(p.targets.length)} / ${fmt(p.decisions)}</td><td>${esc(new Date(p.updated_wall*1000).toISOString())}</td></tr>`).join('');
-$('aiDecisions').innerHTML=(D.decisions||[]).slice().reverse().map(d=>`<tr><td>${esc(d.id)}<br>${esc(d.lane)}</td><td>${esc(d.summary)}</td><td>${esc(d.evidence_ids.join(', ')||d.conclusions.flatMap(c=>c.evidence_ids||[]).join(', '))}<br>新增目标 ${fmt(d.targets_added)}</td></tr>`).join('');
-$('implementations').innerHTML=(D.implementations||[]).map(x=>`<tr><td>${esc(x.campaign+' / '+x.id)}</td><td>${esc(x.case)}</td><td>${esc(x.status)}${x.target_id?' / '+esc(x.target_id):''}</td><td>${x.case_gain==null?'—':fmt(x.case_gain*100)+'%'}</td><td>${fmt(x.official_score)}</td><td>${fmt(x.recovery_attempts)} / ${esc(x.error||'')}</td></tr>`).join('');
-$('samplingTargets').innerHTML=(D.pipelines||[]).flatMap(p=>p.targets.map(t=>`<tr><td>${esc(p.id+' / '+t.id)}</td><td>${esc(t.sampler+' / '+t.status)}${t.error?'<br>'+esc(t.error):''}</td><td>${fmt(t.completed)} / ${fmt(t.launched)} / ${fmt(t.budget)}</td><td>${esc(Object.entries(t.origins||{}).map(([k,v])=>k+': '+v).join(', ')||'固定序列')}</td><td>${fmt(t.feedback_pending)} / ${fmt(t.sampling_jobs_pending)}</td><td>${fmt(t.independent_observations)} / ${fmt(t.historical_priors)} / ${fmt(t.priors_rejected)} / ${fmt(t.priors_pending)}</td></tr>`)).join('');
-$('analysisLanes').innerHTML=(D.pipelines||[]).flatMap(p=>p.lanes.map(l=>`<tr><td>${esc(p.id+' / '+l.lane)}</td><td>${fmt(l.independent_observations)}</td><td>${esc(l.pending?.reasons?.join(', ')||'无待处理请求')}</td><td>${esc(l.recovery_blocked?'恢复待核对':l.running?'监督任务在途':l.manual_requested?'手动请求等待准入':'未执行')}<br>${esc(l.last_error||'')}</td><td>${esc(p.targets.filter(t=>t.lane===l.lane).map(t=>t.id+' ['+t.status+'] '+t.hypothesis).join('；'))}</td></tr>`)).join('');
-$('pipelineCosts').innerHTML=(D.pipelines||[]).map(p=>`<tr><td>${esc(p.id)}</td><td>${fmt(p.status.memory_budget_bytes/1048576)} / ${fmt(p.status.reserved_memory_bytes/1048576)} / ${fmt(p.status.available_memory_admission_bytes/1048576)}</td><td>${fmt(p.attempt_costs?.attempts)} / ${fmt(p.attempt_costs?.attempt_host_seconds)} / ${fmt(p.attempt_costs?.retry_host_seconds)}</td><td>${fmt(p.attempt_costs?.estimated_attempts)}</td></tr>`).join('');
-$('pipelineQueue').innerHTML=(D.pipelines||[]).flatMap(p=>(p.status.queue||[]).map(j=>`<tr><td>${esc(p.id+' / '+j.key)}</td><td>${esc(j.stage)}</td><td>${fmt(j.queue_seconds)}</td><td>${esc(j.reason)}</td></tr>`)).join('');
-$('pipelineProcesses').innerHTML=(D.pipelines||[]).flatMap(p=>(p.status.active||[]).map(j=>`<tr><td>${esc(p.id+' / '+j.key)}</td><td>${esc(j.stage)}</td><td>${fmt(j.pid)} / ${esc(j.identity_status)}</td><td>${fmt(j.queue_wait_seconds)}</td><td>${fmt(j.wall_seconds)} / ${fmt(j.peak_rss_bytes/1048576)}</td></tr>`)).join('');
-function rows(){let q=$('query').value.toLowerCase();$('rows').innerHTML=D.records.filter(r=>(r.id+' '+r.scope).toLowerCase().includes(q)).map(r=>`<tr><td>${esc(r.id)}</td><td>${esc(r.scope)}</td><td>${fmt(r.score)}</td><td>${r.eligible==null?'未评定':r.eligible?'通过':'未通过'}</td><td>${fmt(r.host_seconds)}</td></tr>`).join('')}
-$('hosts').innerHTML=D.host.map(h=>`<tr><td>${esc(h.experiment)}</td><td>${new Date(h.sample.timestamp*1000).toISOString()}</td><td>${fmt(h.sample.cpu_percent_one_core)}</td><td>${fmt((h.sample.tree_rss_bytes||h.sample.rss_bytes)/1024/1024)}</td><td>${esc((h.sample.completed?'已结束，最后采样 ':'')+h.sample.state+' / '+h.sample.wchan)}</td><td>${fmt(h.sample.io_delta?.read_bytes)} / ${fmt(h.sample.io_delta?.write_bytes)}</td></tr>`).join('');$('query').oninput=rows;rows();$('run').innerHTML=Object.keys(D.profiles).filter(id=>Object.keys(D.profiles[id]).length).map(id=>`<option>${esc(id)}</option>`).join('');if(highest&&D.profiles[highest.id])$('run').value=highest.id;for(let n=0;n<16;n++)$('sm').innerHTML+=`<option value="${n}">SM ${n}</option>`;
-function draw(){const id=$('run').value,caseName=$('case').value,p=D.profiles[id]?.[caseName];if(!p){$('metrics').textContent='未提供该案资源报告';$('resources').innerHTML='';$('stages').innerHTML='';$('wait').textContent='等待原因未提供';$('stageNote').textContent='算子阶段未提供';$('detail').textContent='该评估范围没有资源报告';$('heat').getContext('2d').clearRect(0,0,1280,270);return}const r=D.records.find(r=>r.id===id),t=r.cases[caseName]?.timing||{};
-$('metrics').innerHTML=[['周期',p.cycles],['精确峰值 W',t.peak_window_power_w],['HBM 读字节',t.hbm_read_bytes],['HBM 写字节',t.hbm_write_bytes],['资源压力最高',p.pressure_leader?.resource]].map(([k,v])=>`<div class="card">${k}<br><b>${esc(fmt(v))}</b></div>`).join('');
-$('wait').textContent=`等待代理估计：${fmt((p.wait_estimate.fraction??0)*100)}%（低置信度）。这是未被最高资源占用率覆盖的容量，不是实测等待；可能来自依赖、负载不均、同步或调度，无法区分原因。`;
-const resources=p.resources.filter(r=>$('sm').value==='shared'?r.scope==='shared':r.scope==='sm'&&r.entity===$('sm').value);$('resources').innerHTML=resources.map(r=>`<tr><td>${esc(r.entity)}</td><td>${esc(r.resource)}</td><td>${fmt(r.utilization*100)}%</td><td>${fmt(r.busy_cycles)}</td></tr>`).join('');
-$('stageNote').textContent=p.stage_status+'；算子跨度可能重叠或嵌套，不能相加当作总周期。';$('stages').innerHTML=(p.operator_spans||[]).map(s=>`<tr><td>${esc(s.phase)} / ${fmt(s.layer)} / ${fmt(s.decode_step)}</td><td>${esc(s.operator+' '+s.name)}</td><td>${fmt(s.start)}</td><td>${fmt(s.finish)}</td><td>${fmt(s.span_cycles)}</td><td>${esc(s.pressure_estimate?.leader?.resource||'未提供')}（低置信度）</td></tr>`).join('');$('detail').textContent=JSON.stringify({record:r,analysis:{...p,timeline:undefined}},null,2);
-const ctx=$('heat').getContext('2d');ctx.clearRect(0,0,1280,270);ctx.font='12px system-ui';const timeline=p.timeline,selection=$('sm').value;let group=selection==='shared'?timeline?.shared:timeline?.sms?.[selection];
-if(!group){ctx.fillStyle='#fff';ctx.fillText('无时间分箱数据',10,30);return}const entries=Object.entries(group.utilization||group.bandwidth_utilization||group);let row=0;for(const [name,values] of entries){if(!Array.isArray(values))continue;const y=row++*24;ctx.fillStyle='#fff';ctx.fillText(name,0,y+15);values.forEach((v,i)=>{const number=typeof v==='number'?v:0;ctx.fillStyle=`rgba(64,180,255,${Math.min(1,Math.max(.08,number))})`;ctx.fillRect(130+i*1100/values.length,y,1100/values.length,19)})}}
-$('run').onchange=draw;$('case').onchange=draw;$('sm').onchange=draw;draw();
-</script></html>'''
+    records=read()
+    audited=sorted((row for row in records if row.get('scope')=='full' and
+        row.get('audited') is True and row.get('eligible') is True and
+        isinstance(row.get('score'),(int,float))),key=lambda row:row.get('timestamp',''))
+    best=max(audited,key=lambda row:row['score']) if audited else None
+    cases=best.get('cases',{}) if best else {}
+    tasks=_active_tasks()
+    pointer=state()
+    now=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    cards=[('最高已审计分数',_number(best['score']) if best else '—'),
+           ('P1 周期',_number(cases.get('M1_P1',{}).get('timing',{}).get('cycles'),0)),
+           ('D1 周期',_number(cases.get('M2_D1',{}).get('timing',{}).get('cycles'),0)),
+           ('当前运行任务',str(len(tasks)))]
+    card_html=''.join(f'<div class="card"><span>{_text(label)}</span><strong>{_text(value)}</strong></div>'
+                      for label,value in cards)
+    graphs=''.join([
+        _chart('最高分走势',_series(audited,lambda row:row['score']),' 分','#67e4b4'),
+        _chart('P1 最少周期',_series(audited,lambda row:row.get('cases',{}).get('M1_P1',{}).get('timing',{}).get('cycles'),lower=True),' 周期'),
+        _chart('D1 最少周期',_series(audited,lambda row:row.get('cases',{}).get('M2_D1',{}).get('timing',{}).get('cycles'),lower=True),' 周期','#ffc178')])
+    task_rows=''.join('<tr>'+''.join(f'<td>{_text(value)}</td>' for value in
+        (task['campaign'],task['stage'],str(task['key'])[:28],_number(task['seconds'],0)+' s',
+         _number(task['rss_mib'],0)+' MiB'))+'</tr>' for task in tasks)
+    if not task_rows:task_rows='<tr><td colspan="5">当前没有核实仍在运行的任务</td></tr>'
+    latest=_latest_ai()
+    ai_html=(f'<p>{_text(latest["summary"] or "暂无摘要")}</p><small>决策 ID：{_text(latest["id"])}</small>'
+             if latest else '<p>暂无 AI 归档摘要</p>')
+    best_name=_text(best['id']) if best else '尚无已审计成绩'
+    body=f'''<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="30"><title>AI Infra 看板</title>
+<style>body{{font:16px system-ui,sans-serif;background:#0b1424;color:#e6eef7;margin:0 auto;padding:28px;max-width:1200px}}
+h1{{margin:0 0 4px}}h2{{font-size:18px;color:#9bd4ff}}small,.muted{{color:#9aacc3}}
+.cards,.graphs{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}}
+.card,section{{background:#17263b;border:1px solid #29415d;border-radius:12px;padding:18px;margin:12px 0}}
+.card span{{display:block;color:#a9bfd6}}.card strong{{display:block;font-size:28px;margin-top:8px;color:#fff}}
+svg{{width:100%;height:auto}}svg text{{fill:#b8cadc;font:12px system-ui}}table{{width:100%;border-collapse:collapse}}
+th,td{{padding:10px;text-align:left;border-bottom:1px solid #344961;word-break:break-word}}
+.scroll{{overflow-x:auto}}</style></head><body>
+<h1>AI Infra · 精简看板</h1><p class="muted">生成于 {now}；页面每 30 秒重新读取。完整事实仍以实验账本和官方报告为准。</p>
+<div class="cards">{card_html}</div>
+<section><h2>当前最佳</h2><p>{best_name}</p><p>已晋升版本：{_text(pointer.get('promoted_record'))}。趋势仅使用已审计合格整案，单案最快值不代表可直接组合的整案成绩。</p></section>
+<div class="graphs">{graphs}</div>
+<section><h2>正在运行的任务</h2><div class="scroll"><table><thead><tr><th>批次</th><th>阶段</th><th>任务</th><th>运行时间</th><th>峰值 RSS</th></tr></thead><tbody>{task_rows}</tbody></table></div></section>
+<section><h2>最新 AI 整理</h2>{ai_html}</section>
+</body></html>'''
+    target=ROOT/'docs/dashboard.html'
+    target.write_text(body)
+    return {'dashboard':str(target),'bytes':target.stat().st_size,
+            'audited_scores':len(audited),'active_tasks':len(tasks)}

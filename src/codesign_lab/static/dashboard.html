@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Infra · 实时看板</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08111f;--panel:#111e30;--line:#263b54;--text:#edf5ff;--muted:#91a8bf;--mint:#64e4bb;--blue:#70bfff;--amber:#ffc47d}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 80% -10%,#184164 0,transparent 38%),radial-gradient(circle at -10% 60%,#14364b 0,transparent 35%),var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+    .wrap{max-width:1260px;margin:auto;padding:32px 24px 60px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:28px}.eyebrow{font-size:12px;letter-spacing:.18em;color:var(--mint);font-weight:800}h1{font-size:clamp(30px,4vw,42px);line-height:1.1;margin:7px 0 8px;letter-spacing:-.04em}h2{font-size:18px;margin:0 0 8px}p{margin:0}.sub,.hint{color:var(--muted)}.status{display:flex;align-items:center;gap:9px;padding:9px 14px;border:1px solid var(--line);border-radius:999px;background:#112236;font-size:13px;color:#c7d9e9}.dot{height:8px;width:8px;border-radius:50%;background:var(--amber);box-shadow:0 0 12px var(--amber)}.status.ok .dot{background:var(--mint);box-shadow:0 0 12px var(--mint)}
+    .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px}.card,.panel{background:linear-gradient(145deg,#14253a,#101d2e);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 50px #030b1850}.card{padding:20px;min-height:132px}.label{color:var(--muted);font-size:13px}.value{font-size:clamp(24px,2.6vw,34px);font-weight:750;letter-spacing:-.04em;margin-top:15px;white-space:nowrap}.unit{font-size:13px;color:var(--muted);font-weight:500;margin-left:6px}.card:first-child .value{color:var(--mint)}.card:last-child .value{color:var(--blue)}
+    .layout{display:grid;grid-template-columns:1.45fr 1fr;gap:16px}.panel{padding:22px;min-width:0}.panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.tag{border:1px solid #315873;background:#193249;color:#a8dcff;border-radius:999px;padding:3px 9px;font-size:12px;white-space:nowrap}.chart{height:220px;width:100%;display:block}.chart.small{height:160px}.axis{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:2px}.stack{display:grid;gap:16px}.meta{border-top:1px solid var(--line);padding-top:13px;margin-top:14px;color:var(--muted);font-size:12px;word-break:break-all}
+    .full{grid-column:1/-1}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:590px}th{text-align:left;color:var(--muted);font-size:12px;font-weight:600;padding:10px 12px;border-bottom:1px solid var(--line)}td{padding:14px 12px;border-bottom:1px solid #223750}tr:last-child td{border:0}.stage{display:inline-block;background:#1c3b51;color:#9fdbfb;border-radius:8px;padding:3px 8px;font-size:12px}.empty{color:var(--muted);text-align:center;padding:26px!important}.ai{color:#d3e5f2;line-height:1.7;max-width:100ch}.footer{color:var(--muted);font-size:12px;margin-top:20px}
+    @media(max-width:960px){.cards{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.full{grid-column:auto}}@media(max-width:560px){.wrap{padding:22px 14px 44px}.cards{gap:9px}.card{padding:15px;min-height:112px}.value{font-size:24px}.panel{padding:18px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="top"><div><div class="eyebrow">AI INFRA CODESIGN</div><h1>实时优化看板</h1><p class="sub">只展示最佳结果、关键趋势和当前任务。每 5 秒更新一次。</p></div><div class="status" id="connection"><span class="dot"></span><span id="connectionText">连接中</span></div></header>
+    <section class="cards" aria-label="关键指标"><div class="card"><div class="label">最高已审计分数</div><div class="value" id="score">—</div></div><div class="card"><div class="label">P1 周期</div><div class="value" id="p1">—</div></div><div class="card"><div class="label">D1 周期</div><div class="value" id="d1">—</div></div><div class="card"><div class="label">运行中任务</div><div class="value" id="active">—</div></div></section>
+    <div class="layout">
+      <section class="panel"><div class="panel-header"><div><h2>最佳分数走势</h2><p class="hint">仅使用通过官方审计的完整整案</p></div><span class="tag">官方结果</span></div><svg class="chart" id="scoreChart" viewBox="0 0 800 220" role="img" aria-label="最佳分数走势图"></svg><div class="axis"><span>较早</span><span>最新</span></div><div class="meta" id="bestId">等待数据</div></section>
+      <div class="stack"><section class="panel"><div class="panel-header"><div><h2>P1 最少周期</h2><p class="hint">合格整案中的累计最少值</p></div></div><svg class="chart small" id="p1Chart" viewBox="0 0 800 160" role="img" aria-label="P1 周期走势图"></svg></section><section class="panel"><div class="panel-header"><div><h2>D1 最少周期</h2><p class="hint">合格整案中的累计最少值</p></div></div><svg class="chart small" id="d1Chart" viewBox="0 0 800 160" role="img" aria-label="D1 周期走势图"></svg></section></div>
+      <section class="panel full"><div class="panel-header"><div><h2>当前任务</h2><p class="hint">逐个核对进程身份，旧状态不会冒充运行中任务</p></div><span class="tag" id="taskCount">0 个任务</span></div><div class="table-wrap"><table><thead><tr><th>批次</th><th>阶段</th><th>任务</th><th>已运行</th><th>峰值内存</th></tr></thead><tbody id="tasks"><tr><td class="empty" colspan="5">正在读取任务状态…</td></tr></tbody></table></div></section>
+      <section class="panel full"><div class="panel-header"><div><h2>最新 AI 整理</h2><p class="hint">研究判断与正式评估事实分开保存</p></div></div><p class="ai" id="aiSummary">等待数据…</p><div class="meta" id="aiId"></div></section>
+    </div><p class="footer" id="updated">正在连接本地数据服务…</p>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const fmt = (n,d=0) => typeof n === 'number' ? n.toLocaleString('zh-CN',{maximumFractionDigits:d}) : '—';
+    const svgNS='http://www.w3.org/2000/svg';
+    function chart(id, rows, field, color, height) {
+      const svg=$(id);svg.replaceChildren();
+      const values=rows.map(r=>r[field]).filter(v=>typeof v==='number');
+      if(!values.length){const t=document.createElementNS(svgNS,'text');t.setAttribute('x','28');t.setAttribute('y',String(height/2));t.setAttribute('fill','#91a8bf');t.textContent='暂无已审计数据';svg.append(t);return}
+      const lo=Math.min(...values),hi=Math.max(...values),span=Math.max(hi-lo,1),left=26,right=774,top=23,bottom=height-28;
+      const xy=(v,i)=>[left+(right-left)*i/Math.max(values.length-1,1),bottom-(v-lo)/span*(bottom-top)];
+      const guide=document.createElementNS(svgNS,'line');for(const [k,v] of Object.entries({x1:left,y1:bottom,x2:right,y2:bottom,stroke:'#314862','stroke-width':1}))guide.setAttribute(k,String(v));svg.append(guide);
+      const line=document.createElementNS(svgNS,'polyline');line.setAttribute('points',values.map((v,i)=>xy(v,i).join(',')).join(' '));line.setAttribute('fill','none');line.setAttribute('stroke',color);line.setAttribute('stroke-width','3.5');line.setAttribute('stroke-linecap','round');line.setAttribute('stroke-linejoin','round');svg.append(line);
+      values.forEach((v,i)=>{const [x,y]=xy(v,i);const dot=document.createElementNS(svgNS,'circle');dot.setAttribute('cx',x);dot.setAttribute('cy',y);dot.setAttribute('r',i===values.length-1?'6':'3');dot.setAttribute('fill',color);svg.append(dot)});
+      const label=document.createElementNS(svgNS,'text');label.setAttribute('x',String(right));label.setAttribute('y',String(Math.max(17,xy(values.at(-1),values.length-1)[1]-12)));label.setAttribute('text-anchor','end');label.setAttribute('fill',color);label.setAttribute('font-size','17');label.setAttribute('font-weight','700');label.textContent=fmt(values.at(-1),field==='score'?2:0);svg.append(label);
+    }
+    function render(data){
+      const best=data.best||{};$('score').textContent=fmt(best.score,2);$('p1').textContent=fmt(best.p1_cycles);$('d1').textContent=fmt(best.d1_cycles);
+      $('active').textContent=fmt(data.tasks.length);$('taskCount').textContent=data.tasks.length+' 个任务';$('bestId').textContent='当前最佳：'+(best.id||'尚无已审计整案')+' · 已晋升：'+(data.promoted_record||'未设置');
+      chart('scoreChart',data.trend,'score','#64e4bb',220);chart('p1Chart',data.trend,'p1_cycles','#70bfff',160);chart('d1Chart',data.trend,'d1_cycles','#ffc47d',160);
+      const tbody=$('tasks');tbody.replaceChildren();
+      if(!data.tasks.length){const row=tbody.insertRow();const cell=row.insertCell();cell.colSpan=5;cell.className='empty';cell.textContent='当前没有核实仍在运行的任务'}
+      for(const task of data.tasks){const row=tbody.insertRow();for(const value of [task.campaign,task.stage,task.key,fmt(task.seconds)+' 秒',fmt(task.rss_mib)+' MiB']){const cell=row.insertCell();cell.textContent=value}row.cells[1].className='stage'}
+      $('aiSummary').textContent=data.ai?.summary||'暂无 AI 整理';$('aiId').textContent=data.ai?.id?'决策 ID：'+data.ai.id:'';
+      $('updated').textContent='最近更新：'+new Date(data.updated_at).toLocaleString('zh-CN')+' · 仅显示简要指标；完整报告留在本地证据中。';
+      $('connection').classList.add('ok');$('connectionText').textContent='实时连接正常';
+    }
+    async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);render(await response.json())}catch(error){$('connection').classList.remove('ok');$('connectionText').textContent='连接中断 · 正在重试';$('updated').textContent='无法读取实时数据：'+error.message}}
+    refresh();setInterval(refresh,5000);
+  </script>
+</body>
+</html>
