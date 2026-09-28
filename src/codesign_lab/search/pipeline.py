@@ -119,6 +119,14 @@ class Pipeline:
         atomic_json(meta, {'identity': self.identity, 'source': self.source})
         from .targets import TargetPool, epoch
         self.pool = TargetPool(self.out, epoch(), max_proposals=getattr(args, 'max_proposals', 128))
+        for entry in self.pool.state['targets'].values():
+            definition = entry['definition']
+            if definition.get('execution_root'):
+                source = Path(definition['execution_root'])
+                identity = source_identity_at(source)
+                if key(identity) != definition['execution_sha256']:
+                    raise ValueError('恢复的动态目标冻结源码已改变')
+                self.family_sources[str(source)] = identity
         from .budget import Budget
         self.budget = Budget(self.pool.state, wall_seconds=args.budget,
             case_calls=getattr(args, 'max_case_calls', 48), full_calls=getattr(args, 'max_full_calls', 6),
@@ -194,6 +202,23 @@ class Pipeline:
                          'config_sha256': digest(config_path or Path(candidate) / 'config.json'),
                          'generator_sha256': generator_identity(source_root or ROOT),
                          'source_sha256': source_identity_at(source_root or ROOT)}
+
+    def design_key(self, config, source_root):
+        original = key(config)
+        if source_root == ROOT:
+            return original
+        identity = self.family_sources[str(source_root)]
+        return key([str(source_root), original, identity])
+
+    def build_command(self, source_root, config_path, candidate):
+        if source_root == ROOT:
+            return [self.python, '-m', 'codesign_lab.cli', 'build',
+                    str(config_path), '--out', str(candidate)]
+        identity_path = self.out / 'sources' / (key(str(source_root)) + '.json')
+        atomic_json(identity_path, self.family_sources[str(source_root)])
+        return [self.python, '-m', 'codesign_lab.search.family_build',
+                str(source_root), str(config_path), '--out', str(candidate),
+                '--source-identity', str(identity_path)]
 
     def persist_job(self, job, status, **fields):
         if status == 'QUEUED':
@@ -345,19 +370,11 @@ class Pipeline:
                 if reject(config):
                     continue
                 if source_root != ROOT:
-                    config_key = key([str(source_root), config_key, self.family_sources[str(source_root)]])
+                    config_key = self.design_key(config, source_root)
                 candidate = self.out / 'builds' / config_key
                 config_path = self.out / 'configs' / (config_key + '.json')
                 atomic_json(config_path, config)
-                if source_root == ROOT:
-                    command = [self.python, '-m', 'codesign_lab.cli', 'build',
-                               str(config_path), '--out', str(candidate)]
-                else:
-                    identity_path = self.out / 'sources' / (key(str(source_root)) + '.json')
-                    atomic_json(identity_path, self.family_sources[str(source_root)])
-                    command = [self.python, '-m', 'codesign_lab.search.family_build',
-                               str(source_root), str(config_path), '--out', str(candidate),
-                               '--source-identity', str(identity_path)]
+                command = self.build_command(source_root, config_path, candidate)
                 job = {'key': 'build-' + config_key, 'stage': 'build', 'candidate': candidate,
                     'cases': spec.get('cases', ['M1_P1', 'M2_D1']), 'seeds': spec.get('functional_seeds', [7, 123]),
                     'source_root': str(source_root), 'memory_bytes': 1024**3, 'command': command}
@@ -380,6 +397,12 @@ class Pipeline:
         from .targets import DOMAINS
         for target_id, entry in self.pool.state['targets'].items():
             definition = entry['definition']
+            source_root = Path(definition.get('execution_root', ROOT))
+            if source_root != ROOT:
+                identity = source_identity_at(source_root)
+                if key(identity) != definition['execution_sha256']:
+                    raise ValueError('动态目标冻结源码已改变')
+                self.family_sources[str(source_root)] = identity
             adaptive = definition.get('sampler') == 'tpe'
             if adaptive:
                 from .adaptive import prepare
@@ -392,18 +415,21 @@ class Pipeline:
                     entry['status'] = 'DONE'
                     continue
                 base = entry['base_config']
-                base_key = key(base)
+                base_key = self.design_key(base, source_root)
                 base_path = self.out / 'builds' / base_key
                 cfg = self.out / 'configs' / (base_key + '.json')
                 atomic_json(cfg, base)
                 self.enqueue({'key': 'build-' + base_key, 'stage': 'build', 'candidate': base_path,
                     'target_owned': True,
                     'cases': [], 'seeds': [7, 123], 'memory_bytes': 1024**3,
-                    'command': [self.python, '-m', 'codesign_lab.cli', 'build', str(cfg), '--out', str(base_path)]})
+                    'source_root': str(source_root),
+                    'command': self.build_command(source_root, cfg, base_path)})
                 entry['proposal_exhausted'] = False
-                for config_key, config in generate(base, definition['variables'], self.pool.max_proposals,
+                for _proposed_key, config in generate(base, definition['variables'], self.pool.max_proposals,
                         sampler=definition.get('sampler', 'enumerate'),
                         seed=target_seed(definition) if definition.get('sampler') == 'random' else 0):
+                    config_key = (_proposed_key if source_root == ROOT else
+                                  self.design_key(config, source_root))
                     prior = entry['candidates'].get(config_key)
                     if prior and prior['status'] != 'CANCELLED':
                         continue
@@ -430,7 +456,8 @@ class Pipeline:
                     self.enqueue({'key': 'build-' + config_key, 'stage': 'build', 'candidate': candidate,
                         'target_owned': True,
                         'cases': [], 'seeds': [7, 123], 'priority': definition['priority'], 'memory_bytes': 1024**3,
-                        'command': [self.python, '-m', 'codesign_lab.cli', 'build', str(cfg), '--out', str(candidate)]})
+                        'source_root': str(source_root),
+                        'command': self.build_command(source_root, cfg, candidate)})
                 else:
                     entry['proposal_exhausted'] = True
             if entry['status'] not in {'ACTIVE', 'DRAINING'}:
@@ -456,7 +483,7 @@ class Pipeline:
                     # 基准也要有真实性能证据；哈希去重令多个目标共享一次评估。
                     for origin, cases in [(base, candidate_state['cases']), (candidate, changed)]:
                         for case in cases:
-                            evaluation = self.case_job(origin, case, [7, 123])
+                            evaluation = self.case_job(origin, case, [7, 123], source_root=source_root)
                             evaluation['target_owned'] = True
                             candidate_state['case_keys'].extend([evaluation['key'], evaluation['followup']['key']])
                             self.enqueue(evaluation)
@@ -505,6 +532,7 @@ class Pipeline:
                     '优先找可能带来百分比级收益的结构与交互，而非反复追逐千分之一的参数抖动。'
                     '如果当前目标仍在运行，允许先分析已完成方向并提出不同方向的互补目标，不要等待整池清空。'
                     '提出2至4个有证据、互不重复的合法目标，并明确变量、起点、优先级和有限试验预算；'
+                    '可用 available_family_bases 中的记录 ID 作为 base_record，程序会固定其冻结源码；'
                     '硬件改变必须覆盖P1和D1。若只有小收益且可表达的参数空间已经覆盖，转而提出具体实现变更假设。'
                     '审阅 docs/architecture.md、docs/knowledge.md、docs/automation-plan.md 与相关源码；'
                     '可以按需读取仓库文件，但不能改文件或运行昂贵评估。'
@@ -530,6 +558,7 @@ class Pipeline:
                 facts.append({'record_id':record['id'],'case':case,'cycles':timing['cycles'],
                     'peak_power_w':timing.get('peak_window_power_w'),
                     'functional_passed':info.get('functional_passed'),
+                    'source_root':record.get('source_root'),
                     'hardware':{name:hardware.get(name) for name in ('cache_mib','reduction_units','sfu_lanes')},
                     'p1':{name:settings.get(name) for name in ('w1_preload_k','w2_preload_k',
                         'attention_query_tile','attention_key_tile','attention_value_tile')},
@@ -537,11 +566,18 @@ class Pipeline:
         audited=sorted((record for record in rows if record.get('scope')=='full' and
             record.get('audited') and record.get('eligible') and isinstance(record.get('score'),(int,float))),
             key=lambda record:record['score'],reverse=True)[:3]
+        family_bases=[{'record_id':record['id'], 'source_root':record['source_root'],
+                       'cases':{case:info.get('timing',{}).get('cycles')
+                                for case,info in record.get('cases',{}).items()}}
+                      for record in rows if record.get('source_root','').startswith('workspace/families/')
+                      and record.get('source_sha256') and isinstance(record.get('config'),dict)
+                      and any(info.get('timing',{}).get('cycles') for info in record.get('cases',{}).values())]
         return {'targets':[{'target_id':key,'lane':entry['definition']['lane'],
                     'status':entry['status'],'variables':entry['definition']['variables'],
                     'proposed':entry.get('trials_launched'),'completed':entry.get('trials_completed')}
                     for key,entry in self.pool.state['targets'].items()],
                 'case_facts':facts[-80:],
+                'available_family_bases':family_bases[-8:],
                 'best_audited':[{'record_id':record['id'],'score':record['score']}
                                 for record in audited]}
 

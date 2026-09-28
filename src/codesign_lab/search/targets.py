@@ -95,6 +95,24 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
     base = by_id.get(target['base_record'])
     if not base or not isinstance(base.get('config'), dict):
         raise ValueError('base_record 不存在或缺少完整配置')
+    origin = base.get('source_root')
+    if origin:
+        source = Path(origin)
+        source = (source if source.is_absolute() else ROOT / source).resolve()
+        if source != ROOT:
+            if not source.is_relative_to(ROOT / 'workspace/families') or not (source / 'src').is_dir():
+                raise ValueError('历史记录来源不是可用的冻结实现族')
+            files = {str(path.relative_to(source)): digest(path)
+                     for path in sorted((source / 'src').rglob('*.py'))}
+            actual = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+            if actual != base.get('source_sha256') or \
+                    digest(source / 'vendor/official/isolation-manifest.json') != \
+                    digest(ROOT / 'vendor/official/isolation-manifest.json'):
+                raise ValueError('冻结实现族来源身份与历史记录不一致')
+            if target['sampler'] == 'tpe':
+                raise ValueError('冻结实现族动态目标当前只支持枚举或随机采样')
+            target['execution_root'] = str(source)
+            target['execution_sha256'] = actual
     if 'prior_record_ids' in target:
         identifiers=target['prior_record_ids']
         if target['sampler']!='tpe' or not isinstance(identifiers,list) or len(identifiers)>16 or any(not isinstance(identifier,str) or identifier not in by_id for identifier in identifiers) or len(set(identifiers))!=len(identifiers):
