@@ -44,7 +44,9 @@ def run(spec_path):
             child_lease = spec_path.with_suffix('.child.json')
             handshake_deadline = time.monotonic() + min(10, spec['timeout'])
             while not child_lease.exists():
-                if child.poll() is not None or time.monotonic() >= handshake_deadline:
+                if time.monotonic() >= handshake_deadline:
+                    raise TimeoutError('评估子进程登记超时')
+                if child.poll() is not None:
                     raise RuntimeError('评估子进程未完成身份登记')
                 time.sleep(.02)
             registered = load(child_lease)
@@ -70,7 +72,8 @@ def run(spec_path):
             if child is not None:
                 terminate(child)
             result = {'key': spec['job']['key'], 'stage': spec['job']['stage'],
-                'status': 'infrastructure_failed', 'error': type(exc).__name__ + ': ' + str(exc),
+                'status': 'timeout' if isinstance(exc, TimeoutError) else 'infrastructure_failed',
+                'error': type(exc).__name__ + ': ' + str(exc),
                 'wall_seconds': time.monotonic() - started, 'peak_rss_bytes': peak}
         atomic_json(result_path, result)
 

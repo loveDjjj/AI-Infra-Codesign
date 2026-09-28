@@ -55,7 +55,7 @@
 .venv/bin/python scripts/submit.py workspace/reports/release.zip --submit # 实际网站上传
 ```
 
-`package` 要求 `reproduction=verified`，即当前根源码能再生所选版本。隔离 epoch 的 `epoch_verified` 报告即使分数更高，也不能直接在根目录打包；必须从对应源码及保全原件另行审计。课程 ZIP 保留根目录 `hardware.json`、两份 ASM、`local-grade.json`，以及迭代记录和课程代理轨迹；大型轨迹在 ZIP 内以无损 `.jsonl.gz` 保存，`lab verify` 会逐份解压核对原始哈希。完整实验账本和生成看板不重复塞入 ZIP。打包与验证不上传网站。
+`package` 要求 `reproduction=verified` 或 `verified_composite`。前者由当前根源码再生；后者分别从受保护的 P1/D1 源码快照再生，适用于跨源码组合。隔离 epoch 的 `epoch_verified` 报告即使分数更高，也不能直接在根目录打包；必须从对应源码及保全原件另行审计。课程 ZIP 保留根目录 `hardware.json`、两份 ASM、`local-grade.json`，以及迭代记录和课程代理轨迹；大型轨迹在 ZIP 内以无损 `.jsonl.xz` 保存，`lab verify` 会逐份解压核对原始哈希。完整实验账本和生成看板不重复塞入 ZIP。打包与验证不上传网站。
 
 网站脚本默认学号 `260010081`、名称 `GPT-6-Astra-Ultra`，可显式覆盖。实际上传要求完整合格分数比本地已知个人最佳至少提高 1000 分，且与上次上传间隔至少 10 分钟；回执和查询密钥保存在不入 Git 的 `data/submissions/`。HTTP 连接中断后先查询，避免重复提交。
 

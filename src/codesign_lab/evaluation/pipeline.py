@@ -62,7 +62,8 @@ def compact_cases(cases):
     return compact
 
 
-def record_result(identifier, campaign, candidate, case, report, execution):
+def record_result(identifier, campaign, candidate, case, report, execution, source_root=None):
+    import hashlib,json
     from ..records import append, read
     from .profile import summarize
     if identifier in {record['id'] for record in read()}:
@@ -77,11 +78,16 @@ def record_result(identifier, campaign, candidate, case, report, execution):
         if data.get('hardware') != load(candidate / 'hardware.json'):
             raise ValueError('报告的硬件不属于本次候选')
     profile = summarize(timing) if 'resource_stats' in timing else {}
+    source_root = Path(source_root or ROOT).resolve()
+    source_files = {str(path.relative_to(source_root)): digest(path)
+                    for path in sorted((source_root / 'src').rglob('*.py'))}
+    source_sha256 = hashlib.sha256(json.dumps(source_files, sort_keys=True).encode()).hexdigest()
     append({'id': identifier, 'campaign': campaign, 'scope': 'both',
         'cases': compact_cases({case: info}),
         'profile': {case: {key: value for key, value in profile.items() if key != 'timeline'}},
         'config': load(candidate / 'config.json'), 'report': reference(report) if report.exists() else None,
         'candidate': reference(candidate), 'provenance': data.get('provenance'),
+        'source_root': reference(source_root), 'source_sha256': source_sha256,
         'eligible': None, 'score': None, 'audited': False, 'reproduction': 'record_only',
         'host_seconds': execution['wall_seconds'], 'execution': execution,
         'failure_kind': 'design' if info.get('functional_passed') is False

@@ -21,12 +21,19 @@ def generator_identity(root: Path):
             for path in sorted((root / 'src/codesign_lab/codegen').rglob('*.py'))}
 
 
-def build_at(source: Path, config: Path, output: Path, expected: Path):
+def source_identity(root: Path):
+    return {str(path.relative_to(root)): digest(path)
+            for path in sorted((root / 'src').rglob('*.py'))}
+
+
+def build_at(source: Path, config: Path, output: Path, expected: Path | None):
     environment = os.environ.copy()
     environment.update(PYTHONPATH=str(source / 'src'), OPENBLAS_NUM_THREADS='1',
                        OMP_NUM_THREADS='1', PYTHONDONTWRITEBYTECODE='1')
     command = [sys.executable, '-m', 'codesign_lab.cli', 'build', str(config),
-               '--out', str(output), '--verify', str(expected)]
+               '--out', str(output)]
+    if expected is not None:
+        command.extend(['--verify', str(expected)])
     result = subprocess.run(command, cwd=source, env=environment,
                             capture_output=True, text=True, timeout=300)
     if result.returncode:
@@ -52,6 +59,11 @@ def verify_pair(candidate: Path, output: Path):
             raise ValueError('组合来源源码或候选不存在')
         if generator_identity(source) != item['generator_sha256']:
             raise ValueError('组合来源生成器身份已改变')
+        if source_identity(source) != item['source_sha256']:
+            raise ValueError('组合来源项目源码身份已改变')
+        config_path = Path(item.get('config_path', parent / 'config.json'))
+        if item.get('config_sha256') and digest(config_path) != item['config_sha256']:
+            raise ValueError('组合来源配置身份已改变')
         if digest(source / 'vendor/official/isolation-manifest.json') != official_hash:
             raise ValueError('组合来源使用不同官方工作负载')
         if digest(parent / 'hardware.json') != expected_final['hardware.json'] or \
@@ -75,13 +87,15 @@ def verify_pair(candidate: Path, output: Path):
         for case in CASES:
             item = sources[case]
             rebuilt = output / case
-            build_at(item['root'], item['candidate'] / 'config.json', rebuilt, item['candidate'])
+            build_at(item['root'], Path(parents[case].get('config_path', item['candidate'] / 'config.json')), rebuilt, None)
             if digest(rebuilt / 'hardware.json') != expected_final['hardware.json'] or \
                     digest(rebuilt / 'programs' / (case + '.asm')) != expected_final['programs/' + case + '.asm']:
                 raise ValueError('来源再生与组合案例不一致')
     for case in CASES:
         if generator_identity(sources[case]['root']) != parents[case]['generator_sha256']:
             raise ValueError('验证期间来源生成器发生变化')
+        if source_identity(sources[case]['root']) != parents[case]['source_sha256']:
+            raise ValueError('验证期间来源项目源码发生变化')
     result = {'verified': True, 'mode': 'single_source' if same_source else 'mixed_sources',
               'artifact_sha256': expected_final, 'parents': parents,
               'official_manifest_sha256': official_hash}

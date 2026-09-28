@@ -26,7 +26,13 @@ def key(value):
 
 
 def source_identity():
-    return {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / 'src').rglob('*.py'))}
+    return source_identity_at(ROOT)
+
+
+def source_identity_at(root):
+    root = Path(root)
+    return {str(path.relative_to(root)): digest(path)
+            for path in sorted((root / 'src').rglob('*.py'))}
 
 
 def generator_identity(root):
@@ -73,8 +79,19 @@ class Pipeline:
         self.python, self.env = runtime()
         self.manifest = verify_official()
         self.source = source_identity()
+        self.family_sources = {}
+        for source_name, _config_name in getattr(args, 'family_config', []):
+            source_root = Path(source_name).resolve()
+            if not source_root.is_relative_to(ROOT / 'workspace/families') or \
+                    digest(source_root / 'vendor/official/isolation-manifest.json') != \
+                    digest(ROOT / 'vendor/official/isolation-manifest.json'):
+                raise ValueError('实现族必须位于 workspace/families 且使用同一冻结官方工具链')
+            self.family_sources[str(source_root)] = source_identity_at(source_root)
         self.identity = key({'source': self.source, 'official': self.manifest,
             'configs': {str(p): digest(p) for p in args.config}, 'watch': args.watch,
+            'family_configs': [(str(Path(source).resolve()), str(Path(config).resolve()),
+                                self.family_sources[str(Path(source).resolve())], digest(config))
+                               for source, config in getattr(args, 'family_config', [])],
             'workers': args.workers, 'full_slots': args.full_slots,
             'cache_dir': str(getattr(args, 'cache_dir', None)),
             'auto_audit': not getattr(args, 'no_auto_audit', False),
@@ -153,11 +170,19 @@ class Pipeline:
                         releases.append(candidate)
         for root in releases:
             grade = load(root / 'local-grade.json')
+            source_roots = {}
+            if (root / 'composite.json').is_file():
+                from .composite import materialize_source
+                for case in ('M1_P1', 'M2_D1'):
+                    source_roots[case] = materialize_source(root, case,
+                        ROOT / 'workspace/composite-sources' / root.name / case)
             for case, info in grade['cases'].items():
                 timing = info['timing']
-                self.observe(root, case, timing['cycles'], timing['peak_window_power_w'])
+                config_path = root / (case + '-config.json') if source_roots else None
+                self.observe(root, case, timing['cycles'], timing['peak_window_power_w'],
+                             source_root=source_roots.get(case), config_path=config_path)
 
-    def observe(self, candidate, case, cycles, power, source_root=None):
+    def observe(self, candidate, case, cycles, power, source_root=None, config_path=None):
         if power > 20 or cycles <= 0:
             return
         hw = digest(candidate / 'hardware.json')
@@ -165,7 +190,10 @@ class Pipeline:
         if case not in row or cycles < row[case]['cycles']:
             row[case] = {'candidate': candidate, 'cycles': cycles, 'power': power,
                          'source_root': Path(source_root or ROOT),
-                         'generator_sha256': generator_identity(source_root or ROOT)}
+                         'config_path': Path(config_path) if config_path else Path(candidate) / 'config.json',
+                         'config_sha256': digest(config_path or Path(candidate) / 'config.json'),
+                         'generator_sha256': generator_identity(source_root or ROOT),
+                         'source_sha256': source_identity_at(source_root or ROOT)}
 
     def persist_job(self, job, status, **fields):
         if status == 'QUEUED':
@@ -307,19 +335,32 @@ class Pipeline:
         self.completed(job, result)
 
     def prepare(self):
-        for path in self.args.config:
+        sources = [(ROOT, path) for path in self.args.config]
+        sources += [(Path(source).resolve(), Path(path).resolve())
+                    for source, path in getattr(self.args, 'family_config', [])]
+        for source_root, path in sources:
             spec = load(path)
-            base = load(ROOT / spec['base'])
+            base = load(source_root / spec['base'])
             for config_key, config in [('anchor-' + key(base), base), *candidates(base, spec['variables'], spec['max_candidates'])]:
                 if reject(config):
                     continue
+                if source_root != ROOT:
+                    config_key = key([str(source_root), config_key, self.family_sources[str(source_root)]])
                 candidate = self.out / 'builds' / config_key
                 config_path = self.out / 'configs' / (config_key + '.json')
                 atomic_json(config_path, config)
+                if source_root == ROOT:
+                    command = [self.python, '-m', 'codesign_lab.cli', 'build',
+                               str(config_path), '--out', str(candidate)]
+                else:
+                    identity_path = self.out / 'sources' / (key(str(source_root)) + '.json')
+                    atomic_json(identity_path, self.family_sources[str(source_root)])
+                    command = [self.python, '-m', 'codesign_lab.search.family_build',
+                               str(source_root), str(config_path), '--out', str(candidate),
+                               '--source-identity', str(identity_path)]
                 job = {'key': 'build-' + config_key, 'stage': 'build', 'candidate': candidate,
                     'cases': spec.get('cases', ['M1_P1', 'M2_D1']), 'seeds': spec.get('functional_seeds', [7, 123]),
-                    'memory_bytes': 1024**3, 'command': [self.python, '-m', 'codesign_lab.cli',
-                        'build', str(config_path), '--out', str(candidate)]}
+                    'source_root': str(source_root), 'memory_bytes': 1024**3, 'command': command}
                 # 相同配置由多个空间提出时合并案例，避免漏掉第二个工作负载。
                 prior = next((x for x in self.pending if x['key'] == job['key']), None)
                 if prior:
@@ -603,7 +644,7 @@ class Pipeline:
                 # 之后的新目标仍可以重新订阅尚未执行的相同任务。
                 self.seen.discard(job['key'])
 
-    def case_job(self, candidate, case, seeds):
+    def case_job(self, candidate, case, seeds, source_root=None):
         from ..evaluation.cache import engine_identity
         identity = key([digest(candidate / 'hardware.json'), digest(candidate / 'programs' / (case + '.asm')),
                         case, seeds, engine_identity(ROOT / 'vendor/official'), self.manifest['baseline_sha256']])
@@ -612,12 +653,14 @@ class Pipeline:
         estimate = task(self.python, candidate, case, seeds, report, 'case-' + identity,
                         (2 if case == 'M1_P1' else 1) * 1024**3,
                         cache=getattr(getattr(self,'args',None),'cache_dir',None) or True, mode='estimate', functional_report=functional_report)
-        estimate.update(stage='case', stage_mode='estimate', candidate=candidate, case=case, report=report, seeds=seeds)
+        estimate.update(stage='case', stage_mode='estimate', candidate=candidate, case=case,
+                        report=report, seeds=seeds, source_root=str(source_root or ROOT))
         functional = task(self.python, candidate, case, seeds, functional_report,
                           'functional-' + identity, (2 if case == 'M1_P1' else 1) * 1024**3,
                           cache=getattr(getattr(self,'args',None),'cache_dir',None) or True, mode='functional')
         functional.update(stage='functional', candidate=candidate, case=case,
-                          report=functional_report, seeds=seeds, followup=estimate)
+                          report=functional_report, seeds=seeds, followup=estimate,
+                          source_root=str(source_root or ROOT))
         return functional
 
     def complete_functional(self, job, result):
@@ -660,7 +703,8 @@ class Pipeline:
 
     def evaluate_candidate(self, job):
         for case in job['cases']:
-            self.enqueue(self.case_job(job['candidate'], case, job['seeds']))
+            self.enqueue(self.case_job(job['candidate'], case, job['seeds'],
+                                       source_root=job.get('source_root')))
 
     def scan(self):
         # 只接纳指定批次的最终报告，不将正在写入的检查点当作成功结果。
@@ -714,7 +758,10 @@ class Pipeline:
             atomic_json(candidate / 'selection.json', {'predicted_score': score,
                 'parents': {case: {'candidate': str(row['candidate']),
                                    'source_root': str(row['source_root']),
-                                   'generator_sha256': row['generator_sha256']}
+                                   'config_path': str(row['config_path']),
+                                   'config_sha256': row['config_sha256'],
+                                   'generator_sha256': row['generator_sha256'],
+                                   'source_sha256': row['source_sha256']}
                             for case, row in [('M1_P1', p1), ('M2_D1', d1)]},
                 'scope': '单案推算，非正式成绩；来源在正式验收前逐字节再生'})
             report = self.out / 'grades' / (identity + '.json')
@@ -765,10 +812,9 @@ class Pipeline:
                 evidence = self.out / 'verified' / job['pair_id'] / 'pair-verify.json'
                 if evidence.is_file() and load(evidence).get('mode') == 'mixed_sources':
                     self.pool.state.setdefault('mixed_pairs', {})[job['pair_id']] = {
-                        'status': 'VERIFIED_PENDING_COMPOSITE_AUDIT',
+                        'status': 'VERIFIED_QUEUED_FOR_FULL_GRADE',
                         'candidate': str(job['candidate']), 'evidence': str(evidence)}
                     self.pool.save()
-                    return
             next_job = dict(job['followup'])
             next_job['candidate'] = Path(next_job['candidate'])
             next_job['report'] = Path(next_job['report'])
@@ -803,7 +849,9 @@ class Pipeline:
         elif job['stage'] == 'build':
             self.evaluate_candidate(job)
         elif job['stage'] == 'case':
-            record_result(self.out.name + '-' + job['key'], self.out.name, job['candidate'], job['case'], job['report'], result)
+            record_result(self.out.name + '-' + job['key'], self.out.name,
+                          job['candidate'], job['case'], job['report'], result,
+                          source_root=job.get('source_root'))
             data = load(job['report']) if job['report'].exists() else {}
             info = data.get('cases', {}).get(job['case'], {})
             hits = {hit['stage'] for hit in info.get('cache_hits', [])}
@@ -841,7 +889,8 @@ class Pipeline:
                     'failure_kind':'infrastructure' if (info.get('error') or result['status']!='completed') and info.get('functional_passed') is not False else None})
             if info.get('functional_passed') and 'timing' in info:
                 timing = info['timing']
-                self.observe(job['candidate'], job['case'], timing['cycles'], timing['peak_window_power_w'])
+                self.observe(job['candidate'], job['case'], timing['cycles'], timing['peak_window_power_w'],
+                             source_root=job.get('source_root'))
                 self.shortlist()
         elif job['stage'] == 'full':
             data = load(job['report']);identifier = self.out.name + '-' + job['key']
@@ -889,7 +938,7 @@ class Pipeline:
                     with (directory / 'controller.log').open('a') as log:
                         subprocess.Popen(command, cwd=ROOT, env=self.env, stdout=log,
                                          stderr=log, start_new_session=True)
-        next_report = time.monotonic()
+        next_report = time.monotonic() + getattr(self.args, 'report_interval', 30)
         try:
             while True:
                 self.process_targets()
@@ -906,6 +955,9 @@ class Pipeline:
                     next_report = time.monotonic() + getattr(self.args, 'report_interval', 30)
                 if source_identity() != self.source:
                     raise ValueError('源码在运行期间改变，停止流水线')
+                if any(source_identity_at(Path(source)) != identity
+                       for source, identity in self.family_sources.items()):
+                    raise ValueError('冻结实现族源码在运行期间改变，停止流水线')
                 external = self.external()
                 if not expired or any(job['stage'] == 'audit' for job in self.pending):
                     eligible_jobs = self.pending if not expired else [job for job in self.pending if job['stage'] == 'audit']
@@ -1014,6 +1066,9 @@ class Pipeline:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, action='append', default=[])
+    parser.add_argument('--family-config', nargs=2, action='append', default=[],
+                        metavar=('FAMILY_ROOT','SEARCH_CONFIG'),
+                        help='在同一调度器中运行冻结实现族的搜索配置')
     parser.add_argument('--watch', action='append', default=[])
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--cache-dir',type=Path,help='隔离探索缓存目录，必须位于 workspace；默认共享精确缓存')
@@ -1070,11 +1125,17 @@ def main(argv=None):
         parser.error('分析触发阈值无效')
     if any(Path(name).name != name for name in args.watch):
         parser.error('watch 必须是 workspace/search 下的批次名称')
+    for source, config in args.family_config:
+        root = Path(source).resolve()
+        if not root.is_relative_to(ROOT / 'workspace/families') or not (root / 'src').is_dir() or \
+                not Path(config).is_file():
+            parser.error('--family-config 需要 workspace/families 下的冻结源码及现有搜索配置')
     if args.out.exists() and (args.out / 'identity.json').exists() and args.execute and not args.resume:
         parser.error('已有流水线状态，继续运行必须显式 --resume')
     if not args.execute:
         print(json.dumps({'mode': '仅计划，不启动任务', 'workers': min(args.workers, resources()['cpus']),
             'full_slots': args.full_slots, 'watch': args.watch, 'configs': [str(p) for p in args.config],
+            'family_configs': args.family_config,
             'out': str(args.out), 'memory_fraction': args.memory_fraction,
             'budget': {'wall_seconds': args.budget, 'case_calls': args.max_case_calls,
                        'full_calls': args.max_full_calls, 'ai_calls': args.max_ai_calls,
