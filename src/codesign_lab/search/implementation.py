@@ -820,7 +820,18 @@ class ImplementationLoop:
         if grade.get('eligible') is not True:
             save('REJECTED', reason='官方整案不合格', official_score=grade.get('experimental_score'))
             return state
-        record = grade_record(snapshot, report)
+        # 归档会把账本里的 report 改指向受保护 release。恢复时依照已经
+        # 固定的审计记录 ID 找回该行，不再要求它仍指向临时官方报告。
+        record_id = state.get('audit_record')
+        if record_id:
+            record = next((row for row in (json.loads(line) for line in
+                (snapshot / 'data/experiments.jsonl').read_text().splitlines() if line.strip())
+                if row.get('id') == record_id), None)
+            if record is None or record.get('scope') != 'full' or record.get('eligible') is not True:
+                raise ValueError('已审计整案记录不可取回')
+        else:
+            record = grade_record(snapshot, report)
+            save('GRADED', audit_record=record['id'])
         if not record.get('audited'):
             run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'audit', record['id']],
                 'audit', timeout=600)
@@ -830,6 +841,13 @@ class ImplementationLoop:
             save('GRADED', comparison_score=current_best)
         score = grade['experimental_score']
         if score < current_best + self.min_score_gain:
+            release = snapshot / 'data/releases' / record['id']
+            if not release.is_dir():
+                script = ('import sys;from codesign_lab.records import read;'
+                          'from codesign_lab.release import retain_release;'
+                          'retain_release(next(row for row in read() if row["id"]==sys.argv[1]))')
+                run(snapshot, [interpreter(), '-c', script, record['id']],
+                    'retain-research-grade', timeout=600)
             export_epoch_record(snapshot, record['id'], item)
             save('RESEARCH_READY', official_score=score, current_best=current_best,
                  audit_record=record['id'], research_record=record['id'])

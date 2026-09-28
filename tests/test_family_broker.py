@@ -26,6 +26,7 @@ class FamilyBrokerChecks(TestCase):
         self.assertEqual(snapshot['available_family_bases'][0]['record_id'], 'family-record')
 
     def test_dynamic_family_target_pins_recorded_source(self):
+        (ROOT / 'workspace/families').mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=ROOT / 'workspace/families') as directory:
             source = Path(directory)
             code = source / 'src/code.py'

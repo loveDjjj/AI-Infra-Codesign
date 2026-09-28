@@ -55,7 +55,10 @@ class Contracts(unittest.TestCase):
                 value=record.get(key)
                 if value:
                     self.assertFalse(Path(value).is_absolute(),(record['id'],key,value))
-                    self.assertTrue((ROOT/value).exists(),(record['id'],key,value))
+                    # workspace 是可清理运行区；历史账本中的临时报告路径不要求
+                    # 在新的工作树中继续存在，受保护的长期证据仍必须可取回。
+                    if not Path(value).parts[0] == 'workspace':
+                        self.assertTrue((ROOT/value).exists(),(record['id'],key,value))
         self.assertFalse(any(path.is_symlink() for path in (ROOT/'data').rglob('*')))
     def test_workspace_outputs_are_grouped_by_purpose(self):
         from codesign_lab.config import workspace_output

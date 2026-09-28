@@ -539,8 +539,42 @@ class ImplementationChecks(unittest.TestCase):
                 loop.finish_graded(item, state, save)
             self.assertEqual(state['status'], 'WAITING_FOR_LAUNCH')
             self.assertEqual(state['research_record'], 'audited-case')
+            self.assertEqual(state['audit_record'], 'audited-case')
             export.assert_called_once_with(snapshot, 'audited-case', item)
+            self.assertEqual(run.call_args.args[2], 'retain-research-grade')
+
+    def test_retained_below_best_grade_resumes_without_regrading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            report = snapshot / 'workspace/official.json'
+            report.parent.mkdir()
+            report.write_text(json.dumps({'eligible': True, 'experimental_score': 500}))
+            release = snapshot / 'data/releases/audited-case'
+            release.mkdir(parents=True)
+            (release / 'local-grade.json').write_bytes(report.read_bytes())
+            ledger = snapshot / 'data/experiments.jsonl'
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text(json.dumps({'id': 'audited-case', 'scope': 'full',
+                'eligible': True, 'audited': True,
+                'report': 'data/releases/audited-case/local-grade.json'}) + '\n')
+            loop = module.ImplementationLoop.__new__(module.ImplementationLoop)
+            loop.min_score_gain = 100
+            state = {'status': 'GRADED', 'snapshot': str(snapshot), 'report': str(report),
+                     'audit_record': 'audited-case', 'comparison_score': 1000,
+                     'session_id': str(uuid.uuid4())}
+            def save(status, **fields):
+                state.update(status=status, **fields)
+            item = {'id': 'proposal', 'case': 'M1_P1'}
+            with patch.object(module, 'grade_record') as lookup, \
+                 patch.object(module, 'export_epoch_record') as export, \
+                 patch.object(module, 'seed_next_campaign', return_value=snapshot / 'settings.json'), \
+                 patch.object(module, 'launch_next', return_value=None), \
+                 patch.object(module, 'run') as run:
+                loop.finish_graded(item, state, save)
+            self.assertEqual(state['status'], 'WAITING_FOR_LAUNCH')
+            lookup.assert_not_called()
             run.assert_not_called()
+            export.assert_called_once_with(snapshot, 'audited-case', item)
 
     def test_existing_config_values_cannot_be_silently_changed(self):
         old = {'config': {'tile': 32}, 'schedule': 'operator'}

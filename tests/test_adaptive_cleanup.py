@@ -16,6 +16,7 @@ from codesign_lab.search.tpe_client import TPEClient
 @unittest.skipUnless((ROOT/'workspace/search-env/bin/python').is_file(),'需要独立搜索环境')
 class AdaptiveCleanupChecks(unittest.TestCase):
     def test_budget_shrink_closes_created_trial_without_objective(self):
+        (ROOT / 'workspace/pipeline').mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=ROOT/'workspace/pipeline') as directory:
             out=Path(directory);hardware=out/'builds/base/hardware.json';atomic_json(hardware,{})
             definition={'max_trials':0,'priority':.5,'cases':['M2_D1'],'variables':{'x':[1,2]},'seed':7}
