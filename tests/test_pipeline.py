@@ -1,7 +1,10 @@
 """验证官方验收优先、预留容量与资源准入。"""
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from codesign_lab.evaluation.pipeline import compact_cases
 
 spec = importlib.util.spec_from_file_location('rolling_pipeline', Path(__file__).resolve().parents[1] / 'scripts/pipeline.py')
@@ -14,6 +17,27 @@ def job(name, stage='case', memory=1):
 
 
 class PipelineChecks(unittest.TestCase):
+    def test_promoted_release_is_available_for_case_combination(self):
+        import codesign_lab.search.pipeline as controller_module
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'data/releases/joint28').mkdir(parents=True)
+            (root / 'data/releases/top').mkdir(parents=True)
+            (root / 'data/state.json').write_text(json.dumps({'promoted_record': 'top-record'}))
+            (root / 'data/experiments.jsonl').write_text(json.dumps({
+                'id': 'top-record', 'candidate': 'data/releases/top',
+                'eligible': True, 'audited': True}) + '\n')
+            for name, cycles in [('joint28', 100), ('top', 80)]:
+                report = {'cases': {'M1_P1': {'timing': {'cycles': cycles,
+                    'peak_window_power_w': 19}}}}
+                (root / 'data/releases' / name / 'local-grade.json').write_text(json.dumps(report))
+            instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+            instance.observe = Mock()
+            with patch.object(controller_module, 'ROOT', root):
+                instance.accept_release()
+            self.assertEqual(instance.observe.call_count, 2)
+            self.assertEqual(instance.observe.call_args.args[0], root / 'data/releases/top')
+
     def test_official_case_compaction_preserves_metrics_without_nested_resource_trace(self):
         original={'M1_P1':{'functional_passed':True,'timing':{
             'cycles':397212,'peak_window_power_w':19.1,

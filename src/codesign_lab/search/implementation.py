@@ -531,37 +531,126 @@ def seed_next_campaign(snapshot: Path, item: dict, record_id: str, session_id: s
     settings['implementation'] = {'enabled': True, 'model': 'gpt-6-astra',
         'reasoning_effort': 'medium', 'max_proposals': 2,
         'min_case_gain': .002, 'min_score_gain': 100}
+    settings['budget'].update(max_proposals=8, case_calls=24, full_calls=2,
+                              ai_calls=4, wall_seconds=3600)
     settings_path = snapshot / 'configs/next-epoch.json'
     atomic_json(settings_path, settings)
     from .targets import DOMAINS
-    source = hashlib.sha256(json.dumps({str(p.relative_to(snapshot)): digest(p)
-        for p in sorted((snapshot / 'src').rglob('*.py'))}, sort_keys=True).encode()).hexdigest()
-    targets = []
-    for name in ('p1-preload.yaml', 'p1-attention.yaml', 'd1-w2-group.yaml', 'hw-neighborhood.yaml'):
-        path = snapshot / 'configs/targets/astra-global-v2' / name
-        if not path.exists():
-            continue
-        target = load(path)
-        target.update(target_id='epoch-' + item['id'][:8] + '-' + target['lane'],
-                      source_epoch=source, base_record=record_id, evidence_ids=[record_id])
-        target['variables'] = {key: values for key, values in target['variables'].items() if key in DOMAINS}
-        if target['variables']:
-            targets.append(target)
+    source = snapshot_epoch(snapshot)
+    name = 'p1-preload.yaml' if item['case'] == 'M1_P1' else 'd1-w2-group.yaml'
+    path = snapshot / 'configs/targets/astra-global-v2' / name
+    if not path.is_file():
+        raise ValueError('新源码批次缺少受影响案例的初始目标模板')
+    target = load(path)
+    variable = ('programs.M1_P1.config.w2_preload_k' if item['case'] == 'M1_P1'
+                else 'programs.M2_D1.config.w2_load_group_size')
+    target.update(target_id='epoch-' + item['id'][:8] + '-' + target['lane'],
+                  source_epoch=source, base_record=record_id, evidence_ids=[record_id],
+                  hypothesis='新结构首个正确单案后的有界邻域；只检查受影响案例与新数据流的交互。',
+                  variables={variable: DOMAINS[variable]}, max_trials=len(DOMAINS[variable]),
+                  max_inflight=len(DOMAINS[variable]))
+    targets = [target]
     if not targets:
         raise ValueError('新源码批次没有可验证的初始目标')
     payload = snapshot / 'workspace/next-epoch-targets.json'
-    atomic_json(payload, {'targets': targets, 'session_id': session_id, 'out': settings['out']})
+    atomic_json(payload, {'targets': targets, 'session_id': session_id, 'out': settings['out'],
+                          'max_proposals': settings['budget']['max_proposals']})
     code = (
         'import json,sys;from pathlib import Path;'
         'from codesign_lab.config import ROOT;'
         'from codesign_lab.search.targets import TargetPool,epoch;'
         'from codesign_lab.search.triggers import Triggers;'
-        'd=json.loads(Path(sys.argv[1]).read_text());p=TargetPool(ROOT/d["out"],epoch(),max_proposals=96);'
+        'd=json.loads(Path(sys.argv[1]).read_text());p=TargetPool(ROOT/d["out"],epoch(),max_proposals=d["max_proposals"]);'
         '[(lambda r: (_ for _ in ()).throw(ValueError(r)) if r["status"] not in ("accepted","reused") else None)'
         '(p.apply({"request_id":"seed-"+t["target_id"],"command":{"op":"add","target":t}})) for t in d["targets"]];'
         'Triggers(p.state).lane("global")["session_id"]=d["session_id"];p.save()')
     run(snapshot, [interpreter(), '-c', code, str(payload)], 'seed-next', timeout=60)
     return settings_path
+
+
+def snapshot_epoch(snapshot: Path):
+    files = {str(path.relative_to(snapshot)): digest(path)
+             for path in sorted((snapshot / 'src').rglob('*.py'))}
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+
+def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estimate: Path, gain: float):
+    """保存正确但尚未达到正式门槛的结构事实，供同源码后续搜索引用。"""
+    from ..evaluation.pipeline import compact_cases
+    import datetime
+    identifier = 'research-' + item['id']
+    data = load(estimate)
+    info = data['cases'][item['case']]
+    if info.get('functional_passed') is not True or 'timing' not in info or \
+            data.get('hardware') != load(candidate / 'hardware.json') or \
+            data.get('program_sha256', {}).get(item['case']) != digest(
+                candidate / 'programs' / (item['case'] + '.asm')):
+        raise ValueError('研究报告与正确性或程序产物身份不匹配')
+    if not candidate.is_relative_to(snapshot) or not estimate.is_relative_to(snapshot):
+        raise ValueError('研究证据必须属于隔离源码目录')
+    record = {'id': identifier, 'campaign': 'implementation-' + item['id'],
+              'scope': 'both', 'config': load(candidate / 'config.json'),
+              'cases': compact_cases({item['case']: info}),
+              'report': str(estimate.relative_to(snapshot)),
+              'candidate': str(candidate.relative_to(snapshot)),
+              'artifact_sha256': artifacts(candidate), 'case_gain': gain,
+              'eligible': None, 'score': None, 'audited': False,
+              'reproduction': 'record_only', 'source_epoch': snapshot_epoch(snapshot),
+              'parent_decision': item['decision_id'], 'research_admission': True,
+              'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    ledger = snapshot / 'data/experiments.jsonl'
+    with (snapshot / 'data/.experiments.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = next((row for row in (json.loads(line) for line in ledger.read_text().splitlines() if line.strip())
+                         if row['id'] == identifier), None)
+        if existing:
+            if existing.get('artifact_sha256') != record['artifact_sha256']:
+                raise ValueError('研究记录 ID 对应不同的程序产物')
+            record = existing
+        else:
+            with ledger.open('a') as output:
+                output.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
+                output.flush(); os.fsync(output.fileno())
+    export_research_record(snapshot, record)
+    return identifier
+
+
+def export_research_record(snapshot: Path, record: dict):
+    """主账本只收轻量事实；原始单案报告和构建产物保存在一份证据目录。"""
+    origin = origin_root()
+    if origin == snapshot:
+        return
+    identifier = record['id']
+    candidate = snapshot / record['candidate']
+    report = snapshot / record['report']
+    target = origin / 'data/evidence/research' / identifier
+    target.mkdir(parents=True, exist_ok=True)
+    saved_candidate = target / 'candidate'
+    if not saved_candidate.exists():
+        shutil.copytree(candidate, saved_candidate)
+    if artifacts(saved_candidate) != record['artifact_sha256']:
+        raise ValueError('主工程研究证据与隔离产物哈希不一致')
+    saved_report = target / 'estimate.json'
+    if saved_report.exists():
+        if digest(saved_report) != digest(report):
+            raise ValueError('主工程已有不同内容的研究报告')
+    else:
+        shutil.copy2(report, saved_report)
+    exported = dict(record, candidate=str(saved_candidate.relative_to(origin)),
+                    report=str(saved_report.relative_to(origin)),
+                    source_snapshot=str(snapshot))
+    ledger = origin / 'data/experiments.jsonl'
+    with (origin / 'data/.experiments.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+        prior = next((row for row in existing if row['id'] == identifier), None)
+        if prior:
+            if prior.get('artifact_sha256') != record['artifact_sha256']:
+                raise ValueError('主账本已有同 ID 不同产物的研究记录')
+            return
+        with ledger.open('a') as output:
+            output.write(json.dumps(exported, ensure_ascii=False, allow_nan=False) + '\n')
+            output.flush(); os.fsync(output.fileno())
 
 
 def launch_next(snapshot: Path, settings_path: Path):
@@ -615,9 +704,10 @@ class ImplementationLoop:
             save('GRADED', comparison_score=current_best)
         score = grade['experimental_score']
         if score < current_best + self.min_score_gain:
-            save('AUDITED_NO_PROMOTION', official_score=score, current_best=current_best,
-                 audit_record=record['id'])
-            return state
+            export_epoch_record(snapshot, record['id'], item)
+            save('RESEARCH_READY', official_score=score, current_best=current_best,
+                 audit_record=record['id'], research_record=record['id'])
+            return self.finish_research(item, state, save)
         isolated_state = load(snapshot / 'data/state.json')
         if isolated_state.get('promoted_record') != record['id']:
             run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'promote', record['id']],
@@ -631,13 +721,29 @@ class ImplementationLoop:
             save('LAUNCHED', launch=launch)
         return state
 
+    def finish_research(self, item, state, save):
+        """研究准入不冒充正式成绩；只启动一个有界的受影响案例搜索。"""
+        snapshot = Path(state['snapshot'])
+        try:
+            settings = seed_next_campaign(snapshot, item, state['research_record'], state['session_id'])
+            save('WAITING_FOR_LAUNCH', next_settings=str(settings))
+            launch = launch_next(snapshot, settings)
+            if launch is not None:
+                save('LAUNCHED', launch=launch)
+        except Exception as exc:
+            attempts = state.get('research_seed_attempts', 0) + 1
+            save('FAILED' if attempts >= 3 else 'RESEARCH_READY',
+                 research_seed_attempts=attempts,
+                 last_error=type(exc).__name__ + ': ' + str(exc))
+        return state
+
     def process(self, item: dict):
         state_path = self.directory / item['id'] / 'state.json'
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state = load(state_path) if state_path.exists() else {'status': 'QUEUED', 'proposal': item}
         if state['status'] in TERMINAL:
             return state
-        if state['status'] not in {'QUEUED', 'CODED', 'GRADED', 'WAITING_FOR_LAUNCH'}:
+        if state['status'] not in {'QUEUED', 'CODED', 'GRADED', 'RESEARCH_READY', 'WAITING_FOR_LAUNCH'}:
             # 崩溃时不重放可能仍在运行的同一 AI 会话或昂贵官方调用。
             return state
         def save(status, **fields):
@@ -654,6 +760,8 @@ class ImplementationLoop:
             except Exception as exc:
                 save('FAILED', error=type(exc).__name__ + ': ' + str(exc))
                 return state
+        if state['status'] == 'RESEARCH_READY':
+            return self.finish_research(item, state, save)
         if not campaign_generator_unchanged(self.campaign):
             raise ValueError('提案所属生成器源码已改变')
         verify_official()
@@ -754,9 +862,16 @@ class ImplementationLoop:
             timing = load(estimate)['cases'][item['case']]['timing']
             baseline_timing = load(snapshot / 'data/releases' / source_release / 'local-grade.json')['cases'][item['case']]['timing']
             gain = (baseline_timing['cycles'] - timing['cycles']) / baseline_timing['cycles']
-            if timing['peak_window_power_w'] > 20 or gain < self.min_case_gain:
-                save('REJECTED', reason='单案收益或功耗未达门槛', case_gain=gain, timing=timing)
+            if timing['peak_window_power_w'] > 20:
+                save('REJECTED', reason='单案峰值功耗超限', case_gain=gain, timing=timing)
                 return state
+            if gain < self.min_case_gain:
+                research_record = record_research_candidate(snapshot, item, candidate, estimate, gain)
+                save('RESEARCH_READY', case_gain=gain, research_record=research_record,
+                     session_id=session_id,
+                     timing={'cycles': timing['cycles'],
+                             'peak_window_power_w': timing['peak_window_power_w']})
+                return self.finish_research(item, state, save)
             save('OFFICIAL', case_gain=gain,
                  timing={'cycles': timing['cycles'], 'peak_window_power_w': timing['peak_window_power_w']})
             report = snapshot / 'workspace/implementation-reports/official.json'

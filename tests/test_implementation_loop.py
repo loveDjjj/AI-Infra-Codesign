@@ -216,6 +216,104 @@ class ImplementationChecks(unittest.TestCase):
                 rows = list(module.proposals(campaign))
             self.assertEqual([item['case'] for _, item in rows], ['M1_P1', 'M2_D1'])
 
+    def test_research_fact_is_recorded_in_child_source_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'source'
+            origin = root / 'origin'
+            (origin / 'data').mkdir(parents=True)
+            (origin / 'data/experiments.jsonl').write_text('')
+            candidate = snapshot / 'workspace/candidate'
+            estimate = snapshot / 'workspace/estimate.json'
+            (snapshot / 'data').mkdir(parents=True)
+            (snapshot / 'data/experiments.jsonl').write_text('')
+            (candidate / 'programs').mkdir(parents=True)
+            (candidate / 'hardware.json').write_text('{}')
+            (candidate / 'programs/M1_P1.asm').write_text('P1')
+            (candidate / 'programs/M2_D1.asm').write_text('D1')
+            (candidate / 'config.json').write_text(json.dumps({'hardware': {}, 'programs': {}}))
+            estimate.write_text(json.dumps({'hardware': {}, 'program_sha256': {
+                'M1_P1': hashlib.sha256(b'P1').hexdigest()}, 'cases': {'M1_P1': {
+                'functional_passed': True, 'timing': {'cycles': 101, 'peak_window_power_w': 19}}}}))
+            item = {'id': 'structure-1', 'source_epoch': 'old', 'decision_id': 'decision', 'case': 'M1_P1'}
+            with patch.object(module, 'origin_root', return_value=origin):
+                first = module.record_research_candidate(snapshot, item, candidate, estimate, -0.01)
+                second = module.record_research_candidate(snapshot, item, candidate, estimate, -0.01)
+            rows = [json.loads(line) for line in (snapshot / 'data/experiments.jsonl').read_text().splitlines()]
+            exported = [json.loads(line) for line in (origin / 'data/experiments.jsonl').read_text().splitlines()]
+            self.assertEqual(first, second)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(len(exported), 1)
+            self.assertEqual(rows[0]['report'], 'workspace/estimate.json')
+            self.assertTrue((origin / exported[0]['report']).is_file())
+            self.assertEqual(exported[0]['candidate'], 'data/evidence/research/research-structure-1/candidate')
+            self.assertIsNone(rows[0]['score'])
+
+    def test_next_epoch_only_seeds_affected_case_neighborhood(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            for name in ('p1-preload.yaml', 'd1-w2-group.yaml'):
+                source = ROOT / 'configs/targets/astra-global-v2' / name
+                target = snapshot / 'configs/targets/astra-global-v2' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            settings = snapshot / 'configs/pipeline-astra-global-v2.yaml'
+            settings.write_bytes((ROOT / 'configs/pipeline-astra-global-v2.yaml').read_bytes())
+            source = snapshot / 'src/codesign_lab/codegen/one.py'
+            source.parent.mkdir(parents=True)
+            source.write_text('x=1\n')
+            with patch.object(module, 'run'):
+                output = module.seed_next_campaign(snapshot, {'id': 'structure-1', 'case': 'M1_P1'},
+                                                   'research-structure-1', str(uuid.uuid4()))
+            payload = json.loads((snapshot / 'workspace/next-epoch-targets.json').read_text())
+            self.assertEqual(len(payload['targets']), 1)
+            target = payload['targets'][0]
+            self.assertEqual(target['cases'], ['M1_P1'])
+            self.assertEqual(list(target['variables']), ['programs.M1_P1.config.w2_preload_k'])
+            self.assertEqual(target['base_record'], 'research-structure-1')
+            self.assertEqual(json.loads(output.read_text())['budget']['max_proposals'], 8)
+
+    def test_research_admission_waits_for_global_lock_then_launches(self):
+        loop = module.ImplementationLoop.__new__(module.ImplementationLoop)
+        state = {'status': 'RESEARCH_READY', 'snapshot': '/tmp/isolated',
+                 'research_record': 'research-one', 'session_id': str(uuid.uuid4())}
+        def save(status, **fields):
+            state.update(status=status, **fields)
+        with patch.object(module, 'seed_next_campaign', return_value=Path('/tmp/settings.json')) as seed, \
+             patch.object(module, 'launch_next', side_effect=[None, {'pid': 123}]) as launch:
+            loop.finish_research({'id': 'one'}, state, save)
+            self.assertEqual(state['status'], 'WAITING_FOR_LAUNCH')
+            self.assertEqual(state['research_record'], 'research-one')
+            loop.finish_research({'id': 'one'}, state, save)
+            self.assertEqual(state['status'], 'LAUNCHED')
+            self.assertEqual(seed.call_count, 2)
+            self.assertEqual(launch.call_count, 2)
+
+    def test_audited_small_gain_enters_research_without_promotion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            report = snapshot / 'official.json'
+            report.write_text(json.dumps({'eligible': True, 'experimental_score': 500}))
+            loop = module.ImplementationLoop.__new__(module.ImplementationLoop)
+            loop.min_score_gain = 100
+            state = {'status': 'GRADED', 'snapshot': str(snapshot), 'report': str(report),
+                     'session_id': str(uuid.uuid4())}
+            def save(status, **fields):
+                state.update(status=status, **fields)
+            item = {'id': 'proposal', 'case': 'M1_P1'}
+            record = {'id': 'audited-case', 'audited': True}
+            with patch.object(module, 'grade_record', return_value=record), \
+                 patch.object(module, 'audited_best_score', return_value=1000), \
+                 patch.object(module, 'export_epoch_record') as export, \
+                 patch.object(module, 'seed_next_campaign', return_value=snapshot / 'settings.json'), \
+                 patch.object(module, 'launch_next', return_value=None), \
+                 patch.object(module, 'run') as run:
+                loop.finish_graded(item, state, save)
+            self.assertEqual(state['status'], 'WAITING_FOR_LAUNCH')
+            self.assertEqual(state['research_record'], 'audited-case')
+            export.assert_called_once_with(snapshot, 'audited-case', item)
+            run.assert_not_called()
+
     def test_existing_config_values_cannot_be_silently_changed(self):
         old = {'config': {'tile': 32}, 'schedule': 'operator'}
         self.assertTrue(module.preserved_fields(old, {'config': {'tile': 32, 'new_switch': True},

@@ -29,6 +29,12 @@ def source_identity():
     return {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / 'src').rglob('*.py'))}
 
 
+def generator_identity(root):
+    root = Path(root)
+    return {str(path.relative_to(root)): digest(path)
+            for path in sorted((root / 'src/codesign_lab/codegen').rglob('*.py'))}
+
+
 def select_jobs(pending, active, external, workers, full_slots, memory_budget, available):
     """官方验收优先，探索始终保留验收容量，实时内存不足时不启动。"""
     selected = []
@@ -129,19 +135,37 @@ class Pipeline:
             enabled=getattr(args, 'ai_enabled', False), timeout=getattr(args, 'ai_timeout', 600))
 
     def accept_release(self):
-        root = ROOT / 'data/releases/joint28'
-        grade = load(root / 'local-grade.json')
-        for case, info in grade['cases'].items():
-            timing = info['timing']
-            self.observe(root, case, timing['cycles'], timing['peak_window_power_w'])
+        """将已审计且本目录可取回的最佳整案作为组合参照。"""
+        releases = [ROOT / 'data/releases/joint28']
+        state_path = ROOT / 'data/state.json'
+        if state_path.is_file():
+            promoted = load(state_path).get('promoted_record')
+            if promoted:
+                ledger = ROOT / 'data/experiments.jsonl'
+                rows = (json.loads(line) for line in ledger.read_text().splitlines() if line.strip()) if ledger.is_file() else ()
+                record = next((row for row in rows if row.get('id') == promoted), None)
+                if record and record.get('eligible') is True and record.get('audited') is True:
+                    name = record.get('candidate')
+                    candidate = (Path(name) if Path(name).is_absolute() else ROOT / name).resolve() \
+                        if isinstance(name, str) and name else None
+                    if candidate and candidate.is_relative_to((ROOT / 'data/releases').resolve()) and \
+                            candidate.is_dir() and candidate not in releases:
+                        releases.append(candidate)
+        for root in releases:
+            grade = load(root / 'local-grade.json')
+            for case, info in grade['cases'].items():
+                timing = info['timing']
+                self.observe(root, case, timing['cycles'], timing['peak_window_power_w'])
 
-    def observe(self, candidate, case, cycles, power):
+    def observe(self, candidate, case, cycles, power, source_root=None):
         if power > 20 or cycles <= 0:
             return
         hw = digest(candidate / 'hardware.json')
         row = self.best.setdefault(hw, {})
         if case not in row or cycles < row[case]['cycles']:
-            row[case] = {'candidate': candidate, 'cycles': cycles, 'power': power}
+            row[case] = {'candidate': candidate, 'cycles': cycles, 'power': power,
+                         'source_root': Path(source_root or ROOT),
+                         'generator_sha256': generator_identity(source_root or ROOT)}
 
     def persist_job(self, job, status, **fields):
         if status == 'QUEUED':
@@ -688,7 +712,11 @@ class Pipeline:
             config['programs']['M2_D1'] = load(d1['candidate'] / 'config.json')['programs']['M2_D1']
             atomic_json(candidate / 'config.json', config)
             atomic_json(candidate / 'selection.json', {'predicted_score': score,
-                'parents': [reference(p1['candidate']), reference(d1['candidate'])], 'scope': '单案推算，非正式成绩'})
+                'parents': {case: {'candidate': str(row['candidate']),
+                                   'source_root': str(row['source_root']),
+                                   'generator_sha256': row['generator_sha256']}
+                            for case, row in [('M1_P1', p1), ('M2_D1', d1)]},
+                'scope': '单案推算，非正式成绩；来源在正式验收前逐字节再生'})
             report = self.out / 'grades' / (identity + '.json')
             self.full_seen.add(identity)
             followup = {'key': 'full-' + identity, 'stage': 'full', 'candidate': str(candidate),
@@ -698,9 +726,8 @@ class Pipeline:
             self.enqueue({'key': 'verify-' + identity, 'stage': 'verify', 'candidate': candidate,
                 'hardware_hash': digest(candidate / 'hardware.json'), 'pair_id': identity,
                 'priority': score, 'memory_bytes': 1024**3, 'followup': followup,
-                'command': [self.python, '-m', 'codesign_lab.cli', 'build',
-                    str(candidate / 'config.json'), '--out', str(self.out / 'verified' / identity),
-                    '--verify', str(candidate)]})
+                'command': [self.python, '-m', 'codesign_lab.search.pair_verify',
+                    str(candidate), '--out', str(self.out / 'verified' / identity)]})
         self.trim_finalists()
 
 
@@ -734,7 +761,14 @@ class Pipeline:
         if job['stage'] == 'functional':
             self.complete_functional(job, result)
         elif job['stage'] in {'verify', 'profile_build'}:
-
+            if job['stage'] == 'verify' and job.get('pair_id'):
+                evidence = self.out / 'verified' / job['pair_id'] / 'pair-verify.json'
+                if evidence.is_file() and load(evidence).get('mode') == 'mixed_sources':
+                    self.pool.state.setdefault('mixed_pairs', {})[job['pair_id']] = {
+                        'status': 'VERIFIED_PENDING_COMPOSITE_AUDIT',
+                        'candidate': str(job['candidate']), 'evidence': str(evidence)}
+                    self.pool.save()
+                    return
             next_job = dict(job['followup'])
             next_job['candidate'] = Path(next_job['candidate'])
             next_job['report'] = Path(next_job['report'])
