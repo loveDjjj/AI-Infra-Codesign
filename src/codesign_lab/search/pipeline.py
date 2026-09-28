@@ -561,11 +561,17 @@ class Pipeline:
                 snapshot['analysis_task'] = (
                     '你是此批次唯一的全局研究分析者。检查同硬件P1/D1、官方整案成绩、各目标完成和失败、剩余评估预算；'
                     '优先找可能带来百分比级收益的结构与交互，而非反复追逐千分之一的参数抖动。'
-                    '如果当前目标仍在运行，允许先分析已完成方向并提出不同方向的互补目标，不要等待整池清空。'
-                    '提出2至4个有证据、互不重复的合法目标，并明确变量、起点、优先级和有限试验预算；'
+                    '把局部基线与跨源码已审计同案例最佳分别比较；局部改善但仍慢于全局最佳不得称为新最佳。'
+                    '若有预算而活跃加排队任务明显少于可用槽位，必须检查历史轨迹并提前补充互补方向，'
+                    '不要等待昂贵的P1批次全部结束；但不能为了填满槽位重复或编造低价值候选。'
+                    '优先提出2至4个有证据、互不重复的合法目标，并明确变量、起点、优先级和有限试验预算；'
                     '只能从 available_base_records 选择参数目标的 base_record；最高分跨源码组合只用于整案比较，'
                     '不能当作单生成器搜索起点。没有可用新参数时请提出结构假设。'
                     '硬件改变必须覆盖P1和D1。若只有小收益且可表达的参数空间已经覆盖，转而提出具体实现变更假设。'
+                    '当本轮最好单案仍慢于 best_audited_cases 且已覆盖原参数邻域时，优先给出至少一个'
+                    '可用小规模功能与单案测评否证的 implementation_proposals；若不能提出，必须写明缺失的证据。'
+                    '若本轮不新增目标，在summary说明待验证的具体证据、预计队列耗尽时间、为何不能并行验证其他机制；'
+                    '不能只写等待其他任务。结构提案需先说明过去失败机制与一个便宜的否证实验。'
                     '结构任务的预算耗尽和基础设施错误不是性能观测，不得据此判定结构无效。'
                     '审阅 docs/architecture.md、docs/knowledge.md、docs/automation-plan.md 与相关源码；'
                     '可以按需读取仓库文件，但不能改文件或运行昂贵评估。'
@@ -599,6 +605,21 @@ class Pipeline:
         audited=sorted((record for record in rows if record.get('scope')=='full' and
             record.get('audited') and record.get('eligible') and isinstance(record.get('score'),(int,float))),
             key=lambda record:record['score'],reverse=True)[:3]
+        case_best = {}
+        for record in rows:
+            if record.get('scope') != 'full' or record.get('audited') is not True or record.get('eligible') is not True:
+                continue
+            for case, info in record.get('cases', {}).items():
+                timing = info.get('timing', {})
+                cycles, power = timing.get('cycles'), timing.get('peak_window_power_w')
+                if case not in {'M1_P1', 'M2_D1'} or info.get('functional_passed') is not True or \
+                        type(cycles) is not int or type(power) not in (int, float) or power > 20:
+                    continue
+                previous = case_best.get(case)
+                if previous is None or cycles < previous['cycles']:
+                    case_best[case] = {'record_id': record['id'], 'cycles': cycles,
+                                       'peak_power_w': power,
+                                       'hardware': record.get('config', {}).get('hardware')}
         family_bases=[{'record_id':record['id'], 'source_root':record['source_root'],
                        'cases':{case:info.get('timing',{}).get('cycles')
                                 for case,info in record.get('cases',{}).items()}}
@@ -619,8 +640,12 @@ class Pipeline:
                 'case_facts':facts[-80:],
                 'available_family_bases':family_bases[-8:],
                 'available_base_records':available[-12:],
-                'best_audited':[{'record_id':record['id'],'score':record['score']}
-                                for record in audited]}
+                'best_audited':[{'record_id':record['id'],'score':record['score'],
+                    'cases':{case:{'cycles':info.get('timing',{}).get('cycles'),
+                        'peak_power_w':info.get('timing',{}).get('peak_window_power_w')}
+                        for case,info in record.get('cases',{}).items()}}
+                                for record in audited],
+                'best_audited_cases':case_best}
 
     def process_profile_requests(self):
         """profile 先重建核对字节，再占探索槽位进行真实时序跟踪。"""

@@ -13,6 +13,25 @@ from codesign_lab.search.targets import validate_target, epoch
 
 
 class FamilyBrokerChecks(TestCase):
+    def test_global_analysis_shows_cross_source_case_best(self):
+        controller = Pipeline.__new__(Pipeline)
+        controller.out = Path('/tmp/family-campaign')
+        controller.pool = SimpleNamespace(state={'targets': {}})
+        rows = [
+            {'id': 'promoted-root', 'scope': 'full', 'audited': True, 'eligible': True,
+             'score': 48000, 'config': {'hardware': {'cache_mib': 0}},
+             'cases': {'M1_P1': {'functional_passed': True,
+                 'timing': {'cycles': 403197, 'peak_window_power_w': 19.1}}}},
+            {'id': 'faster-family', 'scope': 'full', 'audited': True, 'eligible': True,
+             'score': 49420, 'config': {'hardware': {'cache_mib': 0}},
+             'cases': {'M1_P1': {'functional_passed': True,
+                 'timing': {'cycles': 394545, 'peak_window_power_w': 19.3}}}},
+        ]
+        with patch('codesign_lab.search.pipeline.read', return_value=rows):
+            snapshot = controller.global_snapshot()
+        self.assertEqual(snapshot['best_audited_cases']['M1_P1']['cycles'], 394545)
+        self.assertEqual(snapshot['best_audited'][0]['cases']['M1_P1']['cycles'], 394545)
+
     def test_global_analysis_receives_eligible_family_base_ids(self):
         controller = Pipeline.__new__(Pipeline)
         controller.out = Path('/tmp/family-campaign')
