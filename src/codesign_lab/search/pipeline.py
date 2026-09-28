@@ -47,18 +47,18 @@ def select_jobs(pending, active, external, workers, full_slots, memory_budget, a
     selected = []
     reserved = sum(x['memory_bytes'] for x in active)
     official = {'full', 'verify', 'audit'}
-    # 结构任务内可能进入官方整案，因此整个提案暂占验收槽；始终另留一个给普通整案。
-    full_count = sum(x['stage'] in official | {'implementation'} for x in active)
-    structure_count = sum(x['stage'] == 'implementation' for x in active)
+    # 编码使用探索槽；验证可能进入整案，始终另留一个普通验收槽。
+    full_count = sum(x['stage'] in official | {'implementation_validate'} for x in active)
+    structure_count = sum(x['stage'] == 'implementation_validate' for x in active)
     explore_count = len(active) - full_count + external
     for job in sorted(pending, key=lambda x: (0 if x['stage'] in official else
-                                             1 if x['stage'] == 'implementation' else 2,
+                                             1 if x['stage'].startswith('implementation_') else 2,
                                              -x.get('priority', 0))):
         if job.get('retry_after', 0) > time.time():
             continue
         if len(active) + external + len(selected) >= workers:
             break
-        if job['stage'] == 'implementation':
+        if job['stage'] == 'implementation_validate':
             if structure_count >= full_slots - 1 or full_count >= full_slots:
                 continue
         elif job['stage'] in official:
@@ -71,9 +71,9 @@ def select_jobs(pending, active, external, workers, full_slots, memory_budget, a
         selected.append(job)
         reserved += job['memory_bytes']
         available -= job['memory_bytes']
-        if job['stage'] in official | {'implementation'}:
+        if job['stage'] in official | {'implementation_validate'}:
             full_count += 1
-            structure_count += job['stage'] == 'implementation'
+            structure_count += job['stage'] == 'implementation_validate'
         else:
             explore_count += 1
     return selected
@@ -363,7 +363,7 @@ class Pipeline:
                 or job['key'] in {'build-' + identity, 'build-' + candidate.get('base_key', '')}
                 for identity, candidate in target.get('candidates', {}).items()))
             for target in self.pool.state['targets'].values())
-        if infrastructure and job['stage'] != 'implementation' and not stopped and not self.budget.expired() and attempt <= getattr(self.args, 'max_retries', 1):
+        if infrastructure and not job['stage'].startswith('implementation_') and not stopped and not self.budget.expired() and attempt <= getattr(self.args, 'max_retries', 1):
             retry = dict(job, attempt=attempt + 1, retry_after=time.time() + 30 * attempt, queued_wall=time.time())
             self.persist_job(retry, 'QUEUED')
             self.pending.append(retry)
@@ -852,8 +852,8 @@ class Pipeline:
         lane = self.pool.state.get('analysis', {}).get('lanes', {}).get('global', {})
         if not lane.get('session_id'):
             return
-        active = sum(job['stage'] == 'implementation' for job in self.pending)
-        active += sum(item['job']['stage'] == 'implementation' for item in self.active.values())
+        active = sum(job['stage'].startswith('implementation_') for job in self.pending)
+        active += sum(item['job']['stage'].startswith('implementation_') for item in self.active.values())
         for identifier, item in proposals(self.out):
             if active >= self.args.implementation_max_proposals:
                 break
@@ -863,16 +863,19 @@ class Pipeline:
             if status in TERMINAL | {'WAITING_FOR_LAUNCH'} or status not in {
                     'QUEUED', 'CODED', 'GRADED', 'RESEARCH_READY'}:
                 continue
+            phase = 'code' if status == 'QUEUED' else 'validate'
+            stage = 'implementation_' + phase
             retry = int(state_data.get('recovery_attempts', 0))
-            job_key = 'implementation-' + identifier + ('-recovery' + str(retry) if retry else '')
+            job_key = stage + '-' + identifier + ('-recovery' + str(retry) if retry else '')
             if job_key in self.seen:
                 continue
-            self.enqueue({'key': job_key, 'stage': 'implementation',
+            self.enqueue({'key': job_key, 'stage': stage,
                 'proposal_id': identifier, 'priority': -1,
-                'memory_bytes': 8 * 1024**3, 'timeout': 21600,
+                'memory_bytes': (2 if phase == 'code' else 8) * 1024**3,
+                'timeout': 2400 if phase == 'code' else 21600,
                 'command': [self.python, '-m', 'codesign_lab.search.implementation',
                     '--campaign', self.out.name, '--proposal-id', identifier, '--execute',
-                    '--worker', '--model', self.args.implementation_model,
+                    '--worker', '--phase', phase, '--model', self.args.implementation_model,
                     '--reasoning-effort', self.args.implementation_effort,
                     '--min-case-gain', str(self.args.implementation_min_case_gain),
                     '--min-score-gain', str(self.args.implementation_min_score_gain)]})
@@ -880,7 +883,7 @@ class Pipeline:
 
     def completed(self, job, result):
         self.done.append(result)
-        if job['stage'] == 'implementation':
+        if job['stage'] in {'implementation_code', 'implementation_validate'}:
             state_path = ROOT / 'workspace/implementation-loop' / self.out.name / job['proposal_id'] / 'state.json'
             state = load(state_path) if state_path.exists() else {}
             if state.get('status') == 'TARGET_QUEUED' and result['status'] == 'completed':
@@ -895,7 +898,7 @@ class Pipeline:
                     state.update(status='FAILED', updated_wall=time.time(),
                                  error='结构研究目标注入失败：' + str(receipt))
                 atomic_json(state_path, state)
-            if result['status'] == 'budget_exhausted' and state.get('status', 'QUEUED') == 'QUEUED':
+            if result['status'] == 'budget_exhausted' and state.get('status', 'QUEUED') in {'QUEUED', 'CODED'}:
                 state.update(status='BUDGET_EXHAUSTED', updated_wall=time.time(),
                     error='本批次官方整案调用预算已用尽，结构提案没有启动')
                 atomic_json(state_path, state)
@@ -906,9 +909,15 @@ class Pipeline:
                           ('；' + str(result['error']) if result.get('error') else ''))
                 atomic_json(state_path, state)
             status = state.get('status', 'MISSING')
-            if job.get('budget_key') and not state.get('official_attempted'):
+            if job['stage'] == 'implementation_code' and status == 'CODED' and \
+                    result['status'] == 'completed':
+                self.process_implementations()
+                return
+            if job['stage'] == 'implementation_validate' and job.get('budget_key') and \
+                    not state.get('official_attempted'):
                 self.budget.reused(job['budget_key'])
-            if status == 'FAILED' and result['status'] == 'completed' and \
+            if job['stage'] == 'implementation_validate' and status == 'FAILED' and \
+                    result['status'] == 'completed' and \
                     state.get('recovery_attempts', 0) < 1 and not self.budget.expired() and \
                     str(state.get('error', '')).startswith((
                         'RuntimeError: default-off 失败', 'RuntimeError: regression 失败')):
@@ -1093,7 +1102,7 @@ class Pipeline:
                         attempt = job.get('attempt', 1)
                         job['budget_key'] = job['key'] if attempt == 1 else job['key'] + '-attempt' + str(attempt)
                         budget_kind = ('case' if job['stage'] == 'functional' else
-                                       'full' if job['stage'] == 'implementation' else job['stage'])
+                                       'full' if job['stage'] == 'implementation_validate' else job['stage'])
                         if job['stage'] != 'audit' and not self.budget.reserve(job['budget_key'], budget_kind):
                             self.pending.remove(job)
                             result = {'key': job['key'], 'stage': job['stage'], 'status': 'budget_exhausted', 'wall_seconds': 0}
@@ -1153,7 +1162,7 @@ class Pipeline:
                         full_slots=self.args.full_slots, external=external, memory_budget=self.memory_budget,
                         available=current_available, expired=expired),
                     'attempt_costs': attempt_costs(self.pool.state),
-                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'report','profile_build','profile','implementation']},
+                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'report','profile_build','profile','implementation_code','implementation_validate']},
                     'active': [{'key': k, 'stage': x['job']['stage'], 'pid': x['pid'],
                         'start_ticks': load(Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json'))['start_ticks'] if Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json').exists() else None,
                         'queue_wait_seconds': x['job'].get('queue_wait_seconds'),

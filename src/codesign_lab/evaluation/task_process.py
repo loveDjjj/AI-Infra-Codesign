@@ -31,7 +31,7 @@ def run(path):
             if authorization != {'pid': pid, 'start_ticks': identity['start_ticks']}:
                 raise ValueError('监督放行身份不一致')
             command = spec['job']['command']
-            if spec['job']['stage'] == 'implementation':
+            if spec['job']['stage'] in {'implementation_code', 'implementation_validate'}:
                 # 结构验证的子进程留在本任务进程组，监督器中断时一并收尾。
                 os.environ['CODESIGN_STRUCTURE_WORKER'] = '1'
             os.execvpe(command[0], command, os.environ)

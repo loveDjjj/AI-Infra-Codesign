@@ -15,6 +15,42 @@ from codesign_lab.config import ROOT
 
 
 class ImplementationChecks(unittest.TestCase):
+    def test_code_phase_stops_at_coded_without_running_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/current'
+            campaign.mkdir(parents=True)
+            (campaign / 'state.json').write_text(json.dumps({'analysis': {'lanes': {
+                'global': {'session_id': str(uuid.uuid4())}}}}))
+            manifest = root / 'vendor/official/isolation-manifest.json'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('{}')
+            baseline = {'id': 'base', 'candidate': 'data/releases/joint28',
+                'config': {'hardware': {}, 'programs': {}}}
+            item = {'id': 'first', 'case': 'M1_P1', 'lane': 'p1_w2',
+                'source_epoch': 'epoch', 'decision_id': 'decision',
+                'proposal': '新结构', 'evidence_ids': []}
+            def snapshot(destination, unused):
+                destination.mkdir(parents=True)
+                (destination / 'data/releases/joint28').mkdir(parents=True)
+                (destination / 'data/releases/joint28/local-grade.json').write_text('{}')
+                (destination / 'data/experiments.jsonl').write_text('')
+                return {}
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'campaign_generator_unchanged', return_value=True), \
+                 patch.object(module, 'verify_official'), \
+                 patch.object(module, 'best_record', return_value=baseline), \
+                 patch.object(module, 'snapshot_project', side_effect=snapshot), \
+                 patch.object(module, 'interpreter', return_value='/usr/bin/python3'), \
+                 patch.object(module, 'run'), \
+                 patch.object(module, 'coding_turn', return_value={
+                     'coder_session_id': str(uuid.uuid4())}), \
+                 patch.object(module, 'run_regression') as regression:
+                loop = module.ImplementationLoop(campaign)
+                result = loop.process(item, phase='code')
+            self.assertEqual(result['status'], 'CODED', result.get('error'))
+            regression.assert_not_called()
+
     def test_same_proposal_cannot_run_from_worker_and_manual_cli_together(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

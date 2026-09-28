@@ -9,15 +9,15 @@ def queue_details(pending, active, *, workers, full_slots, external, memory_budg
                   expired=False, now=None):
     now=time.time() if now is None else now
     used=sum(job['memory_bytes'] for job in active)
-    official=sum(job['stage'] in OFFICIAL | {'implementation'} for job in active)
-    structures=sum(job['stage']=='implementation' for job in active)
+    official=sum(job['stage'] in OFFICIAL | {'implementation_validate'} for job in active)
+    structures=sum(job['stage']=='implementation_validate' for job in active)
     rows=[]
     for job in pending:
         if expired and job['stage']!='audit':reason='累计截止时间已到'
         elif job.get('retry_after',0)>now:reason='重试退避'
         elif len(active)+external>=workers:reason='总进程槽位已满'
-        elif job['stage']=='implementation' and structures>=full_slots-1:reason='结构任务保留至少一个普通验收槽位'
-        elif job['stage'] in OFFICIAL | {'implementation'} and official>=full_slots:reason='验收预留槽位已满'
+        elif job['stage']=='implementation_validate' and structures>=full_slots-1:reason='结构验证保留至少一个普通验收槽位'
+        elif job['stage'] in OFFICIAL | {'implementation_validate'} and official>=full_slots:reason='验收预留槽位已满'
         elif job['stage'] not in OFFICIAL and len(active)-official+external>=workers-full_slots:reason='探索槽位已满，保留验收容量'
         elif used+job['memory_bytes']>memory_budget or job['memory_bytes']>available:reason='内存准入限制'
         else:reason='可准入，等待本轮优先级调度'

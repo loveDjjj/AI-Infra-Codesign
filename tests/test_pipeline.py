@@ -68,14 +68,16 @@ class PipelineChecks(unittest.TestCase):
         self.assertEqual(pipeline.select_jobs([job('g', 'full')], [job('running', 'full')], 0, 4, 1, 10, 10), [])
 
     def test_structure_uses_same_capacity_and_preserves_one_official_slot(self):
-        selected = pipeline.select_jobs([job('search'), job('structure', 'implementation'),
+        selected = pipeline.select_jobs([job('search'), job('structure', 'implementation_validate'),
             job('grade', 'full')], [], 0, 4, 2, 10, 10)
         self.assertEqual([item['key'] for item in selected], ['grade', 'structure', 'search'])
-        self.assertEqual(pipeline.select_jobs([job('second', 'implementation')],
-            [job('first', 'implementation')], 0, 4, 2, 10, 10), [])
+        self.assertEqual(pipeline.select_jobs([job('second', 'implementation_validate')],
+            [job('first', 'implementation_validate')], 0, 4, 2, 10, 10), [])
         self.assertEqual([item['key'] for item in pipeline.select_jobs([job('grade', 'full')],
-            [job('first', 'implementation')], 0, 4, 2, 10, 10)], ['grade'])
-        self.assertEqual(pipeline.select_jobs([job('structure', 'implementation')],
+            [job('first', 'implementation_validate')], 0, 4, 2, 10, 10)], ['grade'])
+        self.assertEqual([item['key'] for item in pipeline.select_jobs([job('coder', 'implementation_code')],
+            [job('first', 'implementation_validate')], 0, 4, 2, 10, 10)], ['coder'])
+        self.assertEqual(pipeline.select_jobs([job('structure', 'implementation_validate')],
             [], 0, 4, 1, 10, 10), [])
 
     def test_structural_proposal_is_enqueued_once_after_planner_session_exists(self):
@@ -103,14 +105,20 @@ class PipelineChecks(unittest.TestCase):
             instance.process_implementations()
             instance.process_implementations()
             self.assertEqual([item['proposal_id'] for item in instance.pending], ['first', 'second'])
-            self.assertTrue(all(item['timeout'] == 21600 for item in instance.pending))
+            self.assertTrue(all(item['stage'] == 'implementation_code' and
+                item['timeout'] == 2400 for item in instance.pending))
             instance.pending.clear()
             state = Path(directory) / 'workspace/implementation-loop/structure-campaign/first/state.json'
             state.parent.mkdir(parents=True)
+            state.write_text(json.dumps({'status': 'CODED'}))
+            instance.process_implementations()
+            self.assertEqual([item['key'] for item in instance.pending],
+                             ['implementation_validate-first'])
+            instance.pending.clear()
             state.write_text(json.dumps({'status': 'CODED', 'recovery_attempts': 1}))
             instance.process_implementations()
         self.assertEqual([item['key'] for item in instance.pending],
-                         ['implementation-first-recovery1'])
+                         ['implementation_validate-first-recovery1'])
 
     def test_interrupted_structure_is_recorded_and_sent_to_global_analysis(self):
         import codesign_lab.search.pipeline as controller_module
@@ -126,7 +134,7 @@ class PipelineChecks(unittest.TestCase):
             instance.pool = Mock()
             instance.budget = Mock()
             with patch.object(controller_module, 'ROOT', root):
-                instance.completed({'stage': 'implementation', 'proposal_id': 'first',
+                instance.completed({'stage': 'implementation_validate', 'proposal_id': 'first',
                     'budget_key': 'structure-budget'},
                     {'status': 'infrastructure_failed', 'error': 'worker lost'})
             self.assertEqual(json.loads(path.read_text())['status'], 'FAILED')
@@ -145,7 +153,7 @@ class PipelineChecks(unittest.TestCase):
             instance.triggers = Mock()
             instance.pool = Mock()
             with patch.object(controller_module, 'ROOT', root):
-                instance.completed({'stage': 'implementation', 'proposal_id': 'first'},
+                instance.completed({'stage': 'implementation_validate', 'proposal_id': 'first'},
                     {'status': 'budget_exhausted'})
             path = root / 'workspace/implementation-loop/campaign/first/state.json'
             self.assertEqual(json.loads(path.read_text())['status'], 'BUDGET_EXHAUSTED')
@@ -164,7 +172,7 @@ class PipelineChecks(unittest.TestCase):
             instance.done = []
             instance.triggers, instance.pool, instance.budget = Mock(), Mock(), Mock()
             with patch.object(controller_module, 'ROOT', root):
-                instance.completed({'stage': 'implementation', 'proposal_id': 'first',
+                instance.completed({'stage': 'implementation_validate', 'proposal_id': 'first',
                     'budget_key': 'structure-budget'}, {'status': 'completed'})
             instance.budget.reused.assert_not_called()
 
@@ -189,7 +197,7 @@ class PipelineChecks(unittest.TestCase):
             with patch.object(controller_module, 'ROOT', root), \
                  patch('codesign_lab.search.implementation.retry_infrastructure_failure',
                        side_effect=recover):
-                instance.completed({'stage': 'implementation', 'proposal_id': 'first'},
+                instance.completed({'stage': 'implementation_validate', 'proposal_id': 'first'},
                     {'status': 'completed'})
             self.assertEqual(json.loads(state_path.read_text())['status'], 'CODED')
             self.assertEqual(json.loads(state_path.read_text())['recovery_attempts'], 1)

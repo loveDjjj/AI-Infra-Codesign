@@ -78,7 +78,7 @@ class StructureFamilyInjectionChecks(unittest.TestCase):
             controller.triggers, controller.budget = Mock(), Mock()
             controller.done, controller.initial_score = [], 50000
             with patch.object(pipeline, 'ROOT', root):
-                controller.completed({'stage': 'implementation', 'proposal_id': 'first'},
+                controller.completed({'stage': 'implementation_validate', 'proposal_id': 'first'},
                     {'status': 'completed'})
             self.assertEqual(json.loads(state_path.read_text())['status'], 'TARGET_INJECTED')
             self.assertEqual(controller.initial_score, 51000)

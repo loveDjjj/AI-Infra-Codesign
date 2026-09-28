@@ -832,11 +832,17 @@ class ImplementationLoop:
                  last_error=type(exc).__name__ + ': ' + str(exc))
         return state
 
-    def process(self, item: dict):
+    def process(self, item: dict, *, phase='all'):
+        if phase not in {'all', 'code', 'validate'}:
+            raise ValueError('未知结构任务阶段')
         state_path = self.directory / item['id'] / 'state.json'
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state = load(state_path) if state_path.exists() else {'status': 'QUEUED', 'proposal': item}
         if state['status'] in TERMINAL:
+            return state
+        if phase == 'code' and state['status'] != 'QUEUED':
+            return state
+        if phase == 'validate' and state['status'] == 'QUEUED':
             return state
         if state['status'] not in {'QUEUED', 'CODED', 'GRADED', 'RESEARCH_READY', 'WAITING_FOR_LAUNCH'}:
             # 崩溃时不重放可能仍在运行的同一 AI 会话或昂贵官方调用。
@@ -898,6 +904,8 @@ class ImplementationLoop:
                         digest(snapshot / 'data/releases' / source_release / 'local-grade.json') != release_report_hash:
                     raise ValueError('编码回合修改了冻结依据或实验账本')
                 save('CODED')
+                if phase == 'code':
+                    return state
             elif not all((baseline_build / name).is_file() for name in ARTIFACTS):
                 # 旧控制器把输出放在 workspace 根目录，恢复时重建到稳定的子目录。
                 run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'build', str(base_config),
@@ -980,13 +988,13 @@ class ImplementationLoop:
             return state
 
 
-def process_locked(loop: ImplementationLoop, item: dict):
+def process_locked(loop: ImplementationLoop, item: dict, *, phase='all'):
     """独立 CLI 与主流水线 worker 竞争时同一提案只允许一个执行者。"""
     directory = loop.directory / item['id']
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'proposal.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return loop.process(item)
+        return loop.process(item) if phase == 'all' else loop.process(item, phase=phase)
 
 
 def main(argv=None):
@@ -1001,6 +1009,7 @@ def main(argv=None):
     parser.add_argument('--retry-failed', action='store_true',
                         help='恢复已完成编码但在默认配置复现阶段失败的提案')
     parser.add_argument('--worker', action='store_true', help='由统一流水线准入的单提案执行者')
+    parser.add_argument('--phase', choices=['all', 'code', 'validate'], default='all')
     parser.add_argument('--handoff-only', action='store_true', help='只等待旧批次锁并交接已验证的新版本')
     parser.add_argument('--min-case-gain', type=float, default=.002)
     parser.add_argument('--min-score-gain', type=float, default=100)
@@ -1022,8 +1031,10 @@ def main(argv=None):
         parser.error('指定的提案不属于该批次')
     if args.retry_failed and (not args.execute or not args.proposal_id):
         parser.error('--retry-failed 需要 --execute 和 --proposal-id')
-    if args.worker and (not args.execute or not args.proposal_id or args.watch or args.retry_failed):
+    if args.worker and (not args.execute or not args.proposal_id or args.watch or args.retry_failed or args.phase == 'all'):
         parser.error('--worker 需要单个提案、--execute，且不能进入监视或手动恢复模式')
+    if not args.worker and args.phase != 'all':
+        parser.error('独立阶段只允许统一流水线 worker 执行')
     if args.handoff_only and (not args.execute or args.proposal_id or args.retry_failed or args.worker):
         parser.error('--handoff-only 只允许独立执行交接')
     if not args.execute:
@@ -1041,9 +1052,10 @@ def main(argv=None):
                 time.sleep(args.poll_seconds)
         return 0
     if args.worker:
-        state = process_locked(loop, selected[0][1])
+        state = process_locked(loop, selected[0][1], phase=args.phase)
         print(json.dumps({'proposal_id': args.proposal_id, 'status': state['status']}, ensure_ascii=False), flush=True)
-        return 0 if state['status'] in TERMINAL | {'WAITING_FOR_LAUNCH'} else 75
+        return 0 if state['status'] in TERMINAL | {'WAITING_FOR_LAUNCH'} or \
+            args.phase == 'code' and state['status'] == 'CODED' else 75
     with (loop.directory / 'controller.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.retry_failed:

@@ -25,7 +25,7 @@ class StructureWorkerChecks(unittest.TestCase):
             code = ('from pathlib import Path;import sys;'
                     'from codesign_lab.search.implementation import run;'
                     f'run(Path({str(root)!r}),[sys.executable,"-c",{inner!r}],"stage",timeout=30)')
-            atomic_json(spec, {'job': {'key': 'structure-test', 'stage': 'implementation',
+            atomic_json(spec, {'job': {'key': 'structure-test', 'stage': 'implementation_code',
                 'command': [sys.executable, '-c', code]}, 'cwd': str(root),
                 'result': str(result), 'timeout': 1})
             worker = subprocess.run([sys.executable, '-m', 'codesign_lab.evaluation.worker',
