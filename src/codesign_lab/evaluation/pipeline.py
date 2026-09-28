@@ -22,6 +22,18 @@ def runtime():
     return str(python), env
 
 
+def cache_root():
+    """源码 epoch 可共享精确评估缓存；路径必须属于主工程工作区。"""
+    configured = os.environ.get('CODESIGN_EVAL_CACHE_ROOT')
+    if not configured:
+        return ROOT / 'workspace/search/cache'
+    path = Path(configured)
+    origin = Path(os.environ.get('CODESIGN_ORIGIN_ROOT', ROOT)).resolve()
+    if not path.is_absolute() or not path.resolve().is_relative_to(origin / 'workspace'):
+        raise ValueError('共享评估缓存必须是主工程 workspace 内的绝对路径')
+    return path.resolve()
+
+
 def task(python, candidate, case, seeds, report, key, memory_bytes, cache=True, *, mode="both", functional_report=None):
     command = [python, '-m', 'codesign_lab.evaluation.runner', str(candidate),
                '--mode', mode, '--case', case, '--out', str(report)]
@@ -32,10 +44,22 @@ def task(python, candidate, case, seeds, report, key, memory_bytes, cache=True, 
             raise ValueError('功能依赖仅供时序阶段使用')
         command += ['--functional-report', str(functional_report)]
     if cache:
-        command += ['--cache-dir', str(cache if isinstance(cache, Path) else ROOT / 'workspace/search/cache')]
+        command += ['--cache-dir', str(cache if isinstance(cache, Path) else cache_root())]
     for seed in seeds:
         command += ['--seed', str(seed)]
     return {'key': key, 'command': command, 'cwd': str(ROOT), 'memory_bytes': memory_bytes}
+
+
+def compact_cases(cases):
+    """账本保留可比较指标；大型资源统计继续只存于原始报告。"""
+    compact = {}
+    for case, info in cases.items():
+        entry = {key: value for key, value in info.items() if key != 'resource_stats'}
+        if isinstance(info.get('timing'), dict):
+            entry['timing'] = {key: value for key, value in info['timing'].items()
+                               if key != 'resource_stats'}
+        compact[case] = entry
+    return compact
 
 
 def record_result(identifier, campaign, candidate, case, report, execution):
@@ -54,8 +78,7 @@ def record_result(identifier, campaign, candidate, case, report, execution):
             raise ValueError('报告的硬件不属于本次候选')
     profile = summarize(timing) if 'resource_stats' in timing else {}
     append({'id': identifier, 'campaign': campaign, 'scope': 'both',
-        'cases': {case: {key: value for key, value in info.items() if key != 'timing'} |
-                  {'timing': {key: value for key, value in timing.items() if key != 'resource_stats'}}},
+        'cases': compact_cases({case: info}),
         'profile': {case: {key: value for key, value in profile.items() if key != 'timeline'}},
         'config': load(candidate / 'config.json'), 'report': reference(report) if report.exists() else None,
         'candidate': reference(candidate), 'provenance': data.get('provenance'),

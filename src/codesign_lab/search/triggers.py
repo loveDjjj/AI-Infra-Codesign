@@ -88,8 +88,8 @@ class Triggers:
         now = time.time() if now is None else now
         ready = []
         lanes = {'global'} if self.global_only else {entry['definition']['lane'] for entry in targets.values()} | set(self.state['lanes'])
-        revision = self.pool_revision(targets) if review_exhaustion and queued_tasks == 0 else None
-        if revision is not None:
+        pool_rev = self.pool_revision(targets) if review_exhaustion and queued_tasks == 0 else None
+        if pool_rev is not None:
             lanes.add('global')
         for name in sorted(lanes):
             entry = self.lane(name)
@@ -102,12 +102,12 @@ class Triggers:
             for identifier,target in targets.items():
                 if (not self.global_only and target['definition']['lane'] != name) or target['status'] not in {'DONE','STOPPED','FAILED'}:
                     continue
-                revision = self.completion_revision(target)
+                target_rev = self.completion_revision(target)
                 if identifier in entry['completed_targets'] and identifier not in completed_revisions:
                     # 老记录只有已确认 ID，无法反推旧候选快照；首次迁移不重复分析。
-                    completed_revisions[identifier] = revision
-                if completed_revisions.get(identifier) != revision:
-                    revisions[identifier] = revision
+                    completed_revisions[identifier] = target_rev
+                if completed_revisions.get(identifier) != target_rev:
+                    revisions[identifier] = target_rev
             completed = sorted(revisions)
             reasons = self.trends(entry['observations'], new)
             if any(entry['profiles'][identifier].get('status') in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_failed')
@@ -121,7 +121,7 @@ class Triggers:
             failures = [o for o in new[-self.failure_window:] if o.get('functional_passed') is False]
             if len(failures) >= self.failure_threshold:
                 reasons.append('functional_failures')
-            if name == 'global' and revision is not None and entry.get('reviewed_pool_revision') != revision:
+            if name == 'global' and pool_rev is not None and entry.get('reviewed_pool_revision') != pool_rev:
                 reasons.append('pool_exhausted')
             if not reasons or (entry['last_analysis_wall'] and now - entry['last_analysis_wall'] < self.cooldown):
                 continue
@@ -132,19 +132,19 @@ class Triggers:
                 pending['target_ids'] = sorted(set(pending['target_ids'] + completed))
                 pending.setdefault('target_revisions', {}).update(revisions)
                 pending['profile_ids']=sorted(set(pending.get('profile_ids',[])+profiles))
-                if name == 'global' and revision is not None:
-                    pending['pool_revision']=revision
+                if name == 'global' and pool_rev is not None:
+                    pending['pool_revision']=pool_rev
             else:
                 content = {**self.identity, 'lane': name, 'observations': [o['id'] for o in new], 'targets': revisions,'profiles':profiles}
-                if name == 'global' and revision is not None:
-                    content['pool_revision']=revision
+                if name == 'global' and pool_rev is not None:
+                    content['pool_revision']=pool_rev
                 identifier = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
                 entry['pending'] = {'decision_id': identifier, 'lane': name, 'reasons': reasons,
                     'observation_ids': [o['id'] for o in new], 'target_ids': completed,
                     'target_revisions': revisions, 'created_wall': now}
                 entry['pending']['profile_ids']=profiles
-                if name == 'global' and revision is not None:
-                    entry['pending']['pool_revision']=revision
+                if name == 'global' and pool_rev is not None:
+                    entry['pending']['pool_revision']=pool_rev
             ready.append(entry['pending'])
         return ready
 

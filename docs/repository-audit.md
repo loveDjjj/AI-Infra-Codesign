@@ -13,7 +13,7 @@
 | 生成看板被当作源文件 | `docs/dashboard.html` 约 20 MiB | 展示数据重复、容易陈旧，也推高课程 ZIP 大小 | 保留 `lab report` 本地生成，Git 和课程 ZIP 排除 |
 | 文档存在版本错位 | 旧 README/roadmap 仍指向 joint28 或“正在运行”的旧批次；旧 automation-plan 974 行 | 读者把根源码最佳、隔离源码最高和网站提交混为一谈 | 重写入口/流程/路线与方案，固定日期、ID、证据等级，流水事实回到账本 |
 | 打包边界偏宽 | `release.package()` 曾把完整账本与生成看板连同增长中的根轨迹一起放入 ZIP；剔除重复文件后仍因完整轨迹超出 100 MiB | 课程大小限制会直接阻止提交 | 包内只保留选中记录等必要材料，并将大型原生 JSONL 无损 gzip；`lab verify` 解压对照原哈希 |
-| 最高分不在根源码 | 账本最高 49,283.865188 分的 `reproduction=epoch_verified`；`state.promoted_record` 仍是 joint28 | 克隆根目录不能声称重建最高分，也不能直接从根目录 `lab package` | 保留隔离源码及报告；未来给最高 epoch 单独发布可复现源码锚点，不伪改 `best.yaml` |
+| 最高分不在根源码 | 账本最高 49,283.865188 分的 `reproduction=epoch_verified`；`state.promoted_record` 仍是 joint28 | 克隆根目录不能声称重建最高分，也不能直接从根目录 `lab package` | 受保护 release 已含完整源码归档，本轮隔离再生通过；后续登记并独立备份，不伪改 `best.yaml` |
 
 ## 推荐的稳定目录
 
@@ -43,6 +43,6 @@ AI_Infra/
 
 本次 Git 提交保留代码、测试、配置、中文说明和轻量事实记录。课程要求的完整 `agent-trace/` 不因 Git 忽略而消失；它仍在本机唯一受保护目录，并由 `lab package` 选入课程 ZIP。`data/releases/`、`data/evidence/` 和 starter ZIP 也仍在本机。GitHub 不应当被当作这些原件的唯一备份。已存在的旧 Git 历史含大文件；本次不重写历史，因为重写会改变远端提交身份和协作基础。
 
-最高分的隔离源码目前在嵌套 `workspace/implementation-loop/.../source`，这是长期复现的薄弱环节。下一步应先以报告、生成器哈希和源码归档验证，再将选中的 **一份** 源码锚点放到稳定发布位置或专用 Git 分支；不要把整个 1.8 GiB 的嵌套工作区上传。对应方案在 [自动化方案](automation-plan.md)。
+最高分的隔离源码仍在嵌套 `workspace/implementation-loop/.../source`，但**并非只有这一份**：受保护 `data/releases/official-1790581630771528243/generator-source.tar.gz` 已含完整 `src/`。本轮从该归档隔离重建，硬件及两份 ASM 与发布原件逐字节一致。下一步应登记其来源哈希并独立备份，必要时通过专用 Git 分支提供可取回源码；不要把整个 1.8 GiB 的嵌套工作区上传。对应方案在 [自动化方案](automation-plan.md)。
 
 课程打包实测：joint28 ZIP 为 24,293,083 字节，展开后 57,270,065 字节；`lab verify` 校验了清单、课程轨迹原始哈希、官方原件和三份产物的独立再生。该测试验证的是 joint28 的打包链路，不代表隔离 epoch 的 49,283 分版本已打包。

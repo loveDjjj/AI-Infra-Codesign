@@ -82,7 +82,9 @@ def main():
             command=[sys.executable,'-m','codesign_lab.evaluation.runner',str(args.candidate.resolve()),'--mode',args.level,'--out',str(args.out)]
             for case in args.case or []:command+=['--case',case]
             for seed in args.seed or []:command+=['--seed',str(seed)]
-            if not args.no_cache:command+=['--cache-dir',str(ROOT/'workspace/search/cache')]
+            if not args.no_cache:
+                from .evaluation.pipeline import cache_root
+                command+=['--cache-dir',str(cache_root())]
         start=time.monotonic();child=subprocess.Popen(command)
         proc_children=Path('/proc/self/task/'+os.readlink('/proc/thread-self').split('/')[-1]+'/children').read_text().split()
         proc_pid=next((pid for pid in proc_children if Path('/proc/'+pid+'/status').read_text().split('NSpid:')[1].splitlines()[0].split()[-1]==str(child.pid)),None)

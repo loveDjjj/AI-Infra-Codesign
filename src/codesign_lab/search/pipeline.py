@@ -812,10 +812,10 @@ class Pipeline:
         elif job['stage'] == 'full':
             data = load(job['report']);identifier = self.out.name + '-' + job['key']
             if identifier not in {r['id'] for r in read()}:
+                from ..evaluation.pipeline import compact_cases
                 append({'id': identifier, 'campaign': self.out.name, 'scope': 'full',
                     'config': load(job['candidate'] / 'config.json'),
-                    'cases': {case: {field: value for field, value in metrics.items() if field != 'resource_stats'}
-                              for case, metrics in data.get('cases', {}).items()},
+                    'cases': compact_cases(data.get('cases', {})),
                     'eligible': data.get('eligible'), 'score': data.get('experimental_score'),
                     'report': reference(job['report']), 'candidate': reference(job['candidate']),
                     'provenance': data.get('provenance'), 'audited': False,

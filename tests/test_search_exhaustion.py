@@ -61,6 +61,30 @@ class SearchExhaustionChecks(unittest.TestCase):
         next_request=next(row for row in trigger.poll(targets,0,now=105,review_exhaustion=True) if row['lane']=='global')
         self.assertNotEqual(next_request['decision_id'],global_request['decision_id'])
 
+    def test_global_pool_revision_is_not_overwritten_by_target_completion(self):
+        state={'source_epoch':'epoch','campaign':'test'}
+        targets={
+            'first':{'definition':{'lane':'p1_w2'},'status':'DONE','candidates':{}},
+            'second':{'definition':{'lane':'d1_decode'},'status':'ACTIVE','candidates':{}},
+        }
+        trigger=Triggers(state,cooldown=0,global_only=True)
+        partial=trigger.poll(targets,0,now=100,review_exhaustion=True)[0]
+        self.assertIn('target_completion',partial['reasons'])
+        self.assertNotIn('pool_exhausted',partial['reasons'])
+        self.assertNotIn('pool_revision',partial)
+        trigger.acknowledge('global',partial['decision_id'],now=100)
+        targets['second']['status']='DONE'
+        without_review=trigger.poll(targets,0,now=101,review_exhaustion=False)[0]
+        self.assertNotIn('pool_exhausted',without_review['reasons'])
+        trigger.acknowledge('global',without_review['decision_id'],now=101)
+        expected=trigger.pool_revision(targets)
+        final=trigger.poll(targets,0,now=102,review_exhaustion=True)[0]
+        self.assertIn('pool_exhausted',final['reasons'])
+        self.assertEqual(final['pool_revision'],expected)
+        trigger.acknowledge('global',final['decision_id'],now=102)
+        self.assertEqual(trigger.lane('global')['reviewed_pool_revision'],expected)
+        self.assertEqual(trigger.poll(targets,0,now=103,review_exhaustion=True),[])
+
     def test_global_decision_can_open_another_lane_atomically(self):
         records=[{'id':'base','config':{'hardware':{},'programs':{}}}]
         with tempfile.TemporaryDirectory() as directory:

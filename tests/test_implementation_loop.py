@@ -10,6 +10,19 @@ from codesign_lab.search import implementation as module
 
 
 class ImplementationChecks(unittest.TestCase):
+    def test_new_epoch_receives_origin_evaluation_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            origin=root/'origin'
+            snapshot=root/'epoch/source'
+            with patch.object(module,'ROOT',snapshot), \
+                 patch.object(module,'origin_root',return_value=origin), \
+                 patch.dict('os.environ',{},clear=True):
+                env=module.project_env(snapshot)
+            self.assertEqual(env['CODESIGN_EVAL_CACHE_ROOT'],
+                             str(origin/'workspace/search/cache'))
+            self.assertEqual(env['CODESIGN_ORIGIN_ROOT'],str(origin))
+
     def test_next_epoch_inherits_controller_but_preserves_generator(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

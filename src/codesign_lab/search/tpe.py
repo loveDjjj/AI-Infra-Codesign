@@ -174,9 +174,9 @@ class OptunaSampler:
             if any(observation.get(field)!=self.scope[field] for field in ['case','hardware_hash']):
                 raise ValueError('反馈硬件或案例与后端身份不一致')
             if not isinstance(observation.get('id'),str) or not observation['id']:raise ValueError('反馈缺少事实 ID')
-            # 缓存/基础设施/功能失败不生成虚假 objective。
+            # 缓存命中可提供当前 study 尚未学习的真实结果；重复证据仍只计一次。
             cycles,power=observation.get('cycles'),observation.get('peak_power_w')
-            valid=(observation.get('functional_passed') is True and not observation.get('cache_reused')
+            valid=(observation.get('functional_passed') is True
                 and observation.get('failure_kind')!='infrastructure' and type(cycles) in (int,float)
                 and math.isfinite(cycles) and cycles>0 and type(power) in (int,float) and math.isfinite(power) and power>=0)
             seen=study.user_attrs.get('seen_evidence',{})

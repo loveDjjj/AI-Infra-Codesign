@@ -119,7 +119,8 @@ def project_env(snapshot: Path):
                PYTHONDONTWRITEBYTECODE='1')
     env.setdefault('CODEX_SESSION_LOCK_ROOT', str(ROOT / 'workspace/ai-sessions'))
     env.setdefault('CODESIGN_PIPELINE_LOCK_PATH', str(ROOT / 'workspace/search/.pipeline.lock'))
-    env.setdefault('CODESIGN_ORIGIN_ROOT', str(ROOT))
+    env.setdefault('CODESIGN_ORIGIN_ROOT', str(origin_root()))
+    env.setdefault('CODESIGN_EVAL_CACHE_ROOT', str(origin_root() / 'workspace/search/cache'))
     env.pop('PYTHONHOME', None)
     safe = snapshot / '.git/safe-config'
     if safe.is_file():
@@ -611,9 +612,12 @@ class ImplementationLoop:
                 raise ValueError('功能检查没有通过')
             save('ESTIMATING')
             estimate = snapshot / 'workspace/implementation-reports/estimate.json'
+            cache = Path(os.environ.get('CODESIGN_EVAL_CACHE_ROOT',
+                                        str(origin_root() / 'workspace/search/cache'))).resolve()
             run(snapshot, [interpreter(), '-m', 'codesign_lab.evaluation.runner', str(candidate),
                 '--mode', 'estimate', '--case', item['case'], '--functional-report', str(functional),
-                '--seed', '7', '--seed', '123', '--out', str(estimate)], 'estimate', timeout=3600)
+                '--seed', '7', '--seed', '123', '--cache-dir', str(cache), '--out', str(estimate)],
+                'estimate', timeout=3600)
             timing = load(estimate)['cases'][item['case']]['timing']
             baseline_timing = load(snapshot / 'data/releases' / source_release / 'local-grade.json')['cases'][item['case']]['timing']
             gain = (baseline_timing['cycles'] - timing['cycles']) / baseline_timing['cycles']

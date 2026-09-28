@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from codesign_lab.evaluation.pipeline import compact_cases
 
 spec = importlib.util.spec_from_file_location('rolling_pipeline', Path(__file__).resolve().parents[1] / 'scripts/pipeline.py')
 pipeline = importlib.util.module_from_spec(spec)
@@ -13,6 +14,17 @@ def job(name, stage='case', memory=1):
 
 
 class PipelineChecks(unittest.TestCase):
+    def test_official_case_compaction_preserves_metrics_without_nested_resource_trace(self):
+        original={'M1_P1':{'functional_passed':True,'timing':{
+            'cycles':397212,'peak_window_power_w':19.1,
+            'resource_stats':{'large_trace':[1,2,3]}}},
+            'M2_D1':{'functional_passed':False,'timing':{'cycles':43523}}}
+        compact=compact_cases(original)
+        self.assertEqual(compact['M1_P1']['timing'],
+            {'cycles':397212,'peak_window_power_w':19.1})
+        self.assertFalse(compact['M2_D1']['functional_passed'])
+        self.assertIn('resource_stats',original['M1_P1']['timing'])
+
     def test_full_grade_starts_before_waiting_exploration(self):
         selected = pipeline.select_jobs([job('explore'), job('grade', 'full')], [], 0, 4, 1, 10, 10)
         self.assertEqual(selected[0]['key'], 'grade')

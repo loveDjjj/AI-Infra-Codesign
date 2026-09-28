@@ -56,13 +56,20 @@ class TPEBackendChecks(unittest.TestCase):
             self.assertEqual(trial.value,100)
             self.assertEqual(trial.user_attrs['constraints'],[1.0])
 
-    def test_cache_and_scope_mismatch_never_create_fake_performance(self):
+    def test_first_cached_result_is_learned_but_invalid_feedback_is_not(self):
         with tempfile.TemporaryDirectory() as directory:
             sampler=OptunaSampler(directory,{'x':[1,2,3]},self.scope)
             proposal=sampler.ask()
             with self.assertRaises(ValueError):sampler.tell(proposal['number'],self.observation(hardware_hash='other'))
-            self.assertEqual(sampler.tell(proposal['number'],self.observation(cache_reused=True)),'no_performance')
-            self.assertIsNone(sampler.study(0).get_trials()[0].value)
+            cached=self.observation(cache_reused=True)
+            self.assertEqual(sampler.tell(proposal['number'],cached),'eligible')
+            self.assertEqual(sampler.tell(proposal['number'],cached),'reused_receipt')
+            self.assertEqual(sampler.study(0).get_trials()[0].value,100)
+            second=sampler.ask()
+            self.assertEqual(sampler.tell(second['number'],cached),'no_performance')
+            self.assertIsNone(sampler.study(0).get_trials()[1].value)
+            third=sampler.ask()
+            self.assertEqual(sampler.tell(third['number'],self.observation(id='invalid',cache_reused=True,cycles=None)),'no_performance')
 
     def test_finite_space_exhausts_without_repeat(self):
         with tempfile.TemporaryDirectory() as directory:

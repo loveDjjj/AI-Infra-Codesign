@@ -1,7 +1,10 @@
 """阶段依赖必须绑定真实输入、工具与种子。"""
 import copy
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from codesign_lab.config import ROOT
 from codesign_lab.evaluation.stages import functional_evidence
 from codesign_lab.evaluation.pipeline import task
 
@@ -46,6 +49,17 @@ class StageChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             task('python', Path('/candidate'), 'M2_D1', [7], Path('/report'), 'key', 1,
                  mode='functional', functional_report=Path('/functional'))
+
+    def test_isolated_epoch_uses_only_origin_workspace_cache(self):
+        shared=ROOT/'workspace/search/cache'
+        with patch.dict(os.environ,{'CODESIGN_ORIGIN_ROOT':str(ROOT),
+                                    'CODESIGN_EVAL_CACHE_ROOT':str(shared)}):
+            job=task('python',Path('/candidate'),'M2_D1',[7],Path('/report'),'key',1)
+            self.assertEqual(job['command'][job['command'].index('--cache-dir')+1],str(shared))
+        with patch.dict(os.environ,{'CODESIGN_ORIGIN_ROOT':str(ROOT),
+                                    'CODESIGN_EVAL_CACHE_ROOT':'/tmp/unrelated-cache'}):
+            with self.assertRaisesRegex(ValueError,'共享评估缓存'):
+                task('python',Path('/candidate'),'M2_D1',[7],Path('/report'),'key',1)
 
 
     def test_unrelated_case_change_keeps_case_dependency_valid(self):
