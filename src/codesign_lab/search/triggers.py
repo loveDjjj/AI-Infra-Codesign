@@ -79,7 +79,7 @@ class Triggers:
 
     def pool_revision(self, targets):
         """全池终态的稳定身份；相同结果只请求一次全局分析。"""
-        if not targets or any(target['status'] not in {'DONE','STOPPED','FAILED'} for target in targets.values()):
+        if any(target['status'] not in {'DONE','STOPPED','FAILED'} for target in targets.values()):
             return None
         content={identifier:self.completion_revision(target) for identifier,target in sorted(targets.items())}
         return hashlib.sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()
@@ -110,8 +110,13 @@ class Triggers:
                     revisions[identifier] = target_rev
             completed = sorted(revisions)
             reasons = self.trends(entry['observations'], new)
+            # 每份新评估证据立即交给同一 lane 的分析会话；并发完成的结果合并成一次快照。
+            result_ready = any(item.get('observation_kind') in {'case_result', 'official_result'} for item in new)
+            if result_ready:
+                reasons.append('result_ready')
             if any(item.get('observation_kind') == 'implementation' for item in new):
                 reasons.append('implementation_result')
+                result_ready = True
             if any(entry['profiles'][identifier].get('status') in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_failed')
             if any(entry['profiles'][identifier].get('status') not in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_ready')
             if completed:
@@ -125,7 +130,7 @@ class Triggers:
                 reasons.append('functional_failures')
             if name == 'global' and pool_rev is not None and entry.get('reviewed_pool_revision') != pool_rev:
                 reasons.append('pool_exhausted')
-            if not reasons or (entry['last_analysis_wall'] and now - entry['last_analysis_wall'] < self.cooldown):
+            if not reasons or (not result_ready and entry['last_analysis_wall'] and now - entry['last_analysis_wall'] < self.cooldown):
                 continue
             if entry['pending']:
                 pending = entry['pending']

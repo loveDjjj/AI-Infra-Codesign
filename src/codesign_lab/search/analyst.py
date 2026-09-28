@@ -5,7 +5,8 @@ import time
 from pathlib import Path
 
 from ..ai_bridge import analyze
-from ..config import load
+from ..config import ROOT, load
+from .scheduler import atomic_json
 
 
 class Analyst:
@@ -54,6 +55,9 @@ class Analyst:
                 self.triggers.state=self.pool.state['analysis']
                 entry=self.triggers.lane(lane)
                 if result['status'] not in {'accepted','reused'}:raise ValueError(result.get('error','决策拒绝'))
+                if lane == 'global' and self.triggers.global_only:
+                    atomic_json(ROOT/'workspace/ai-sessions/global.json',
+                        {'session_id': answer['session_id']})
                 entry['last_error']=None
                 accepted=True
             except Exception as exc:

@@ -46,7 +46,8 @@ def retain_release(record):
     if not composite:
         with tarfile.open(target/'generator-source.tar.gz','w:gz') as archive:
             for path in sorted((ROOT/'src').rglob('*.py')):archive.add(path,arcname=str(path.relative_to(ROOT)),recursive=False)
-    return update(identifier,{'report':reference(target/'local-grade.json'),'audit_path':reference(target/'local-grade.audit.json'),'reproduction_evidence':reference(target/'build.json'),'candidate':reference(target)})
+    evidence=target/('composite.json' if composite else 'build.json')
+    return update(identifier,{'report':reference(target/'local-grade.json'),'audit_path':reference(target/'local-grade.audit.json'),'reproduction_evidence':reference(evidence),'candidate':reference(target)})
 
 def promote(identifier):
     record=next(r for r in read() if r['id']==identifier)

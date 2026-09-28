@@ -17,6 +17,33 @@ def job(name, stage='case', memory=1):
 
 
 class PipelineChecks(unittest.TestCase):
+    def test_audited_composite_is_available_even_when_not_promoted(self):
+        import codesign_lab.search.pipeline as controller_module
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            release=root/'data/releases/composite';release.mkdir(parents=True)
+            (root/'data/releases/joint28').mkdir(parents=True)
+            (release/'composite.json').write_text('{}')
+            (root/'data/experiments.jsonl').write_text(json.dumps({
+                'id':'composite','candidate':'data/releases/composite',
+                'eligible':True,'audited':True,'reproduction':'verified_composite'})+'\n')
+            report={'cases':{'M1_P1':{'timing':{'cycles':10,'peak_window_power_w':19}},
+                'M2_D1':{'timing':{'cycles':20,'peak_window_power_w':18}}}}
+            for candidate in (release,root/'data/releases/joint28'):
+                (candidate/'local-grade.json').write_text(json.dumps(report))
+            instance=pipeline.Pipeline.__new__(pipeline.Pipeline)
+            instance.observe=Mock()
+            with patch.object(controller_module,'ROOT',root), \
+                 patch('codesign_lab.search.composite.materialize_source',
+                       side_effect=lambda candidate,case,destination:destination):
+                instance.accept_release()
+            self.assertEqual(instance.observe.call_count,4)
+            composite_calls=[call for call in instance.observe.call_args_list
+                             if call.args[0]==release]
+            self.assertEqual(len(composite_calls),2)
+            self.assertTrue(all(call.kwargs['source_root'].is_relative_to(
+                root/'workspace/composite-sources/composite') for call in composite_calls))
+
     def test_promoted_release_is_available_for_case_combination(self):
         import codesign_lab.search.pipeline as controller_module
         with tempfile.TemporaryDirectory() as directory:

@@ -20,6 +20,8 @@ class AutoAuditChecks(unittest.TestCase):
         controller.done=[];controller.out=root;controller.python='python'
         controller.args=SimpleNamespace(no_auto_audit=disabled)
         controller.enqueue=Mock()
+        controller.triggers=Mock()
+        controller.pool=Mock()
         with patch('codesign_lab.search.pipeline.read', return_value=[]), \
              patch('codesign_lab.search.pipeline.append') as append:
             controller.completed({'stage':'full','key':'full-pair', 'candidate':candidate,

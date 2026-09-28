@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 
 from ..config import ROOT
 from codesign_lab.config import load, digest, verify_official, reference, bootstrap
@@ -149,6 +150,12 @@ class Pipeline:
             stagnation_trials=getattr(args, 'stagnation_trials', 12), improvement_threshold=getattr(args, 'improvement_threshold', .002),
             failure_window=getattr(args, 'failure_window', 6), failure_threshold=getattr(args, 'failure_threshold', 5),
             global_only=getattr(args, 'analysis_mode', 'per_lane') == 'global')
+        if self.triggers.global_only and not self.triggers.lane('global').get('session_id'):
+            session_file=ROOT/'workspace/ai-sessions/global.json'
+            if session_file.is_file():
+                session_id=load(session_file).get('session_id')
+                uuid.UUID(session_id)
+                self.triggers.lane('global')['session_id']=session_id
         self.pool.save()
         self.pending, self.active, self.done = [], {}, []
         self.seen, self.full_seen = set(), set()
@@ -176,11 +183,11 @@ class Pipeline:
         """将已审计且本目录可取回的最佳整案作为组合参照。"""
         releases = [ROOT / 'data/releases/joint28']
         state_path = ROOT / 'data/state.json'
+        ledger = ROOT / 'data/experiments.jsonl'
+        rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()] if ledger.is_file() else []
         if state_path.is_file():
             promoted = load(state_path).get('promoted_record')
             if promoted:
-                ledger = ROOT / 'data/experiments.jsonl'
-                rows = (json.loads(line) for line in ledger.read_text().splitlines() if line.strip()) if ledger.is_file() else ()
                 record = next((row for row in rows if row.get('id') == promoted), None)
                 if record and record.get('eligible') is True and record.get('audited') is True:
                     name = record.get('candidate')
@@ -189,6 +196,17 @@ class Pipeline:
                     if candidate and candidate.is_relative_to((ROOT / 'data/releases').resolve()) and \
                             candidate.is_dir() and candidate not in releases:
                         releases.append(candidate)
+        # 已审计组合可能优于已晋升版本；其分案来源已被各自冻结归档。
+        for record in rows:
+            if record.get('audited') is not True or record.get('eligible') is not True or \
+                    record.get('reproduction') != 'verified_composite':
+                continue
+            name = record.get('candidate')
+            candidate = (Path(name) if Path(name).is_absolute() else ROOT / name).resolve() \
+                if isinstance(name, str) and name else None
+            if candidate and candidate.is_relative_to((ROOT / 'data/releases').resolve()) and \
+                    (candidate / 'composite.json').is_file() and candidate not in releases:
+                releases.append(candidate)
         for root in releases:
             grade = load(root / 'local-grade.json')
             source_roots = {}
@@ -980,7 +998,7 @@ class Pipeline:
                 error=result.get('error',result['status']),failed_stage=job['stage'])
             self.notify_profile(job['profile_id'])
             self.pool.save()
-        if result['status'] != 'completed' and job['stage'] not in {'case', 'functional'}:
+        if result['status'] != 'completed' and job['stage'] not in {'case', 'functional', 'audit'}:
             return
         if job['stage'] == 'functional':
             self.complete_functional(job, result)
@@ -1036,17 +1054,22 @@ class Pipeline:
             if 'timing' in hits and (job.get('stage_mode') == 'estimate' or set(job.get('seeds', [7, 123])) <= set(functional_hits)):
                 self.budget.reused(job.get('budget_key', job['key']))
                 self.pool.save()
+            observation={'id': self.out.name + '-' + job['key'],
+                'observation_kind': 'case_result', 'record_id': self.out.name + '-' + job['key'],
+                'case': job['case'], 'functional_passed': info.get('functional_passed'),
+                'hardware_hash': digest(job['candidate'] / 'hardware.json'),
+                'cycles': info.get('timing', {}).get('cycles'),
+                'peak_power_w': info.get('timing', {}).get('peak_window_power_w'),
+                'cache_reused': 'timing' in hits,
+                'failure_kind': 'infrastructure' if (info.get('error') or result['status'] != 'completed')
+                    and info.get('functional_passed') is not False else None}
+            if self.triggers.global_only:
+                self.triggers.observe('global', observation)
             for target in self.pool.state['targets'].values():
                 if target['status'] == 'STOPPED':
                     continue
                 if any(job['key'] in c.get('case_keys', []) for c in target.get('candidates', {}).values()):
-                    self.triggers.observe(target['definition']['lane'], {'id': self.out.name + '-' + job['key'],
-                        'case': job['case'], 'functional_passed': info.get('functional_passed'),
-                        'hardware_hash': digest(job['candidate'] / 'hardware.json'),
-                        'cycles': info.get('timing', {}).get('cycles'),
-                        'peak_power_w': info.get('timing', {}).get('peak_window_power_w'),
-                        'cache_reused': 'timing' in hits,
-                        'failure_kind': 'infrastructure' if (info.get('error') or result['status'] != 'completed') and info.get('functional_passed') is not False else None})
+                    self.triggers.observe(target['definition']['lane'], observation)
             from .samplers import FiniteSampler, target_seed
             for target in self.pool.state['targets'].values():
                 state = target.get('sampler_state')
@@ -1082,6 +1105,12 @@ class Pipeline:
                     'reproduction': 'record_only', 'host_seconds': result['wall_seconds']})
             print(json.dumps({'event': 'official_grade_finished', 'record': identifier,
                               'eligible': data.get('eligible'), 'score': data.get('experimental_score')}, ensure_ascii=False), flush=True)
+            if data.get('eligible') is not True or getattr(self.args, 'no_auto_audit', False):
+                self.triggers.observe('global', {'id': 'official-' + identifier,
+                    'observation_kind': 'official_result', 'record_id': identifier,
+                    'eligible': data.get('eligible'), 'score': data.get('experimental_score'),
+                    'audited': False, 'report': reference(job['report'])})
+                self.pool.save()
             if data.get('eligible') is True and not getattr(self.args, 'no_auto_audit', False):
                 self.enqueue({'key': 'audit-' + job['key'], 'stage': 'audit', 'record_id': identifier,
                     'priority': data.get('experimental_score', 0), 'memory_bytes': 1024**3,
@@ -1090,6 +1119,12 @@ class Pipeline:
             record = next(r for r in read() if r['id'] == job['record_id'])
             if record.get('audited') and record.get('eligible'):
                 self.initial_score = max(self.initial_score, record['score'])
+            self.triggers.observe('global', {'id': 'official-' + record['id'],
+                'observation_kind': 'official_result', 'record_id': record['id'],
+                'eligible': record.get('eligible'), 'score': record.get('score'),
+                'audited': record.get('audited'), 'report': record.get('report'),
+                'audit_error': None if result['status'] == 'completed' else result.get('error', result['status'])})
+            self.pool.save()
             print(json.dumps({'event': 'official_audit_finished', 'record': record['id'],
                 'audited': record.get('audited'), 'report': record.get('report')}, ensure_ascii=False), flush=True)
 

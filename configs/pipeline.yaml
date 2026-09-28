@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
-  "out": "workspace/pipeline/closed-loop-v2",
+  "out": "workspace/pipeline/closed-loop-result-ai",
   "search_configs": [],
   "watch": [],
   "stay_open": true,
+  "stop_on_exhaustion": true,
   "auto_audit": true,
   "scheduler": {
     "workers": 56,
@@ -18,7 +19,7 @@
     "max_proposals": 128,
     "case_calls": 48,
     "full_calls": 6,
-    "ai_calls": 10,
+    "ai_calls": 64,
     "profile_calls": 2
   },
   "full_grade": {
@@ -26,7 +27,8 @@
     "max_pending": 3
   },
   "ai": {
-    "enabled": false,
+    "enabled": true,
+    "mode": "global",
     "timeout_seconds": 600,
     "model": "gpt-6-astra",
     "reasoning_effort": "medium"

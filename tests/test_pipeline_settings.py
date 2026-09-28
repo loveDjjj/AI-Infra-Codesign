@@ -48,10 +48,11 @@ class SettingsChecks(unittest.TestCase):
         for value in ["data/cache", "../outside", True]:
             with self.assertRaises(ValueError):self.settings({"cache_dir":value})
 
-    def test_default_file_is_plan_only_and_ai_disabled(self):
+    def test_default_file_is_plan_only_with_global_ai_ready(self):
         argv=arguments(ROOT/'configs/pipeline.yaml')
         self.assertNotIn('--execute',argv)
-        self.assertNotIn('--ai-enabled',argv)
+        self.assertIn('--ai-enabled',argv)
+        self.assertEqual(argv[argv.index('--analysis-mode')+1], 'global')
         with redirect_stdout(StringIO()) as output:main(argv)
         self.assertIn('仅计划',output.getvalue())
 

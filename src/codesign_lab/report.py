@@ -79,7 +79,17 @@ def generate():
             'target_id':item.get('target_id'), 'recovery_attempts':item.get('recovery_attempts',0),
             'error':item.get('error') or item.get('last_error') or item.get('reason'),
             'updated_wall':item.get('updated_wall')})
-    data={'pipelines':pipelines,'implementations':implementations,'host':host,'campaigns':campaigns,'records':[{key:value for key,value in record.items() if key!='profile'} for record in records],'state':state(),'profiles':profiles}
+    decision_path=ROOT/'data/decisions.jsonl'
+    decisions=[]
+    if decision_path.is_file():
+        for line in decision_path.read_text().splitlines():
+            if line.strip():
+                row=json.loads(line);decision=row.get('decision',{})
+                decisions.append({'id':row.get('id'),'lane':row.get('lane'),
+                    'summary':decision.get('summary'),'conclusions':decision.get('conclusions',[]),
+                    'evidence_ids':list(row.get('evidence_snapshot',{})),
+                    'targets_added':len(decision.get('new_targets',[]))})
+    data={'pipelines':pipelines,'implementations':implementations,'host':host,'campaigns':campaigns,'records':[{key:value for key,value in record.items() if key!='profile'} for record in records],'state':state(),'profiles':profiles,'decisions':decisions[-30:]}
     payload=json.dumps(data,ensure_ascii=False).replace('<',r'\u003c')
     page=TEMPLATE.replace('__DATA__',payload)
     target=ROOT/'docs/dashboard.html';target.write_text(page)
@@ -98,6 +108,7 @@ TEMPLATE = r'''<!doctype html><html lang="zh"><meta charset="utf-8"><title>Codes
 <h1>AI Infra · 研究工作台</h1><p>配置定义设计，账本保存事实；测量、估计与假设分开显示。页面由 ./lab report 生成。</p>
 <section><h2>当前状态</h2><div class="cards" id="status"></div></section>
 <section><h2>动态流水线与验收</h2><p>生成时快照；更新时刻是状态文件时间，旧状态不能证明进程仍然存活。预测与正式评分分别记录。</p><table><thead><tr><th>流水线</th><th>总槽位 / 验收预留</th><th>活跃 / 排队</th><th>冷 case / full 已使用</th><th>目标 / 决策</th><th>状态更新时间</th></tr></thead><tbody id="pipelines"></tbody></table></section>
+<section><h2>AI 结果整理</h2><p>来自已校验的决策账本；AI 结论是研究判断，实测事实仍以实验记录和官方报告为准。</p><table><thead><tr><th>决策 / lane</th><th>结果摘要</th><th>证据与后续目标</th></tr></thead><tbody id="aiDecisions"></tbody></table></section>
 <section><h2>隔离结构实验</h2><p>AI 提案进入统一调度；正确且功耗合格的新结构可在原批次继续有限搜索。正式成绩仍由冻结官方整案和审计决定。失败记录不等于性能观测。</p><table><thead><tr><th>批次 / 提案</th><th>案例</th><th>关卡 / 续搜目标</th><th>单案收益</th><th>官方分数</th><th>恢复次数 / 失败原因</th></tr></thead><tbody id="implementations"></tbody></table></section>
 <section><h2>主控资源、等待与重试</h2><p>主机调度实测；等待原因是准入条件，不是模拟芯片 stall。累计任务秒可并行重叠，不等于墙钟时间。</p><table><thead><tr><th>流水线</th><th>内存预算 / 预留 / 可准入 MiB</th><th>已记录尝试 / 累计秒 / 重试秒</th><th>恢复估计次数</th></tr></thead><tbody id="pipelineCosts"></tbody></table><h3>排队任务</h3><table><thead><tr><th>流水线 / 任务</th><th>阶段</th><th>等待秒</th><th>准入等待原因</th></tr></thead><tbody id="pipelineQueue"></tbody></table><h3>评估监督进程</h3><table><thead><tr><th>流水线 / 任务</th><th>阶段</th><th>PID / 身份</th><th>准入等待秒</th><th>运行秒 / RSS MiB</th></tr></thead><tbody id="pipelineProcesses"></tbody></table></section>
 <section><h2>目标采样与反馈</h2><p>提案来源是后端接口记录；TPE 启动期仍可能是随机提案。缓存反馈不计独立性能观测，终态恢复检查不代表采样收益。</p><table><thead><tr><th>流水线 / 目标</th><th>采样 / 状态</th><th>完成 / 提出 / 预算</th><th>提案来源</th><th>待反馈 / 后端任务</th><th>本轮独立观测 / 历史先验 / 拒绝 / 待处理</th></tr></thead><tbody id="samplingTargets"></tbody></table></section><section><h2>分析请求与研究方向</h2><p>待分析请求不等于真实 AI 已执行；离线决策用于链路验证。</p><table><thead><tr><th>流水线 / lane</th><th>独立观测</th><th>待分析原因</th><th>执行 / 恢复状态</th><th>当前假设</th></tr></thead><tbody id="analysisLanes"></tbody></table></section>
@@ -111,6 +122,7 @@ const highest=D.records.filter(r=>r.audited&&r.eligible&&r.score!=null).sort((a,
 $('status').innerHTML=[['最高已审计',highest?.id],['已晋升',D.state.promoted_record],['已归档版本',D.state.archived_release],['已提交（有收据）',D.state.submitted_release]].map(([label,value])=>`<div class="card">${label}<br><b>${esc(value||'未设置')}</b></div>`).join('');
 $('campaigns').innerHTML=(D.campaigns||[]).map(c=>`<tr><td>${esc(c.id)}</td><td>${fmt(c.status.workers_limit)}</td><td>${fmt(c.status.active?.length)} / ${fmt(c.status.pending)} / ${fmt(c.status.completed)}</td><td>${fmt(c.status.memory_budget_bytes/1024/1024)}</td><td>${fmt(c.summary?.wall_seconds??c.status.elapsed_seconds)}</td></tr>`).join('');
 $('pipelines').innerHTML=(D.pipelines||[]).map(p=>`<tr><td>${esc(p.id)}</td><td>${fmt(p.status.workers_limit)} / ${fmt(p.status.full_slots)}</td><td>${fmt(p.status.active?.length)} / ${fmt(Object.values(p.status.pending||{}).reduce((a,b)=>a+b,0))}</td><td>${fmt(p.status.budget?.used?.case)} / ${fmt(p.status.budget?.used?.full)}</td><td>${fmt(p.targets.length)} / ${fmt(p.decisions)}</td><td>${esc(new Date(p.updated_wall*1000).toISOString())}</td></tr>`).join('');
+$('aiDecisions').innerHTML=(D.decisions||[]).slice().reverse().map(d=>`<tr><td>${esc(d.id)}<br>${esc(d.lane)}</td><td>${esc(d.summary)}</td><td>${esc(d.evidence_ids.join(', ')||d.conclusions.flatMap(c=>c.evidence_ids||[]).join(', '))}<br>新增目标 ${fmt(d.targets_added)}</td></tr>`).join('');
 $('implementations').innerHTML=(D.implementations||[]).map(x=>`<tr><td>${esc(x.campaign+' / '+x.id)}</td><td>${esc(x.case)}</td><td>${esc(x.status)}${x.target_id?' / '+esc(x.target_id):''}</td><td>${x.case_gain==null?'—':fmt(x.case_gain*100)+'%'}</td><td>${fmt(x.official_score)}</td><td>${fmt(x.recovery_attempts)} / ${esc(x.error||'')}</td></tr>`).join('');
 $('samplingTargets').innerHTML=(D.pipelines||[]).flatMap(p=>p.targets.map(t=>`<tr><td>${esc(p.id+' / '+t.id)}</td><td>${esc(t.sampler+' / '+t.status)}${t.error?'<br>'+esc(t.error):''}</td><td>${fmt(t.completed)} / ${fmt(t.launched)} / ${fmt(t.budget)}</td><td>${esc(Object.entries(t.origins||{}).map(([k,v])=>k+': '+v).join(', ')||'固定序列')}</td><td>${fmt(t.feedback_pending)} / ${fmt(t.sampling_jobs_pending)}</td><td>${fmt(t.independent_observations)} / ${fmt(t.historical_priors)} / ${fmt(t.priors_rejected)} / ${fmt(t.priors_pending)}</td></tr>`)).join('');
 $('analysisLanes').innerHTML=(D.pipelines||[]).flatMap(p=>p.lanes.map(l=>`<tr><td>${esc(p.id+' / '+l.lane)}</td><td>${fmt(l.independent_observations)}</td><td>${esc(l.pending?.reasons?.join(', ')||'无待处理请求')}</td><td>${esc(l.recovery_blocked?'恢复待核对':l.running?'监督任务在途':l.manual_requested?'手动请求等待准入':'未执行')}<br>${esc(l.last_error||'')}</td><td>${esc(p.targets.filter(t=>t.lane===l.lane).map(t=>t.id+' ['+t.status+'] '+t.hypothesis).join('；'))}</td></tr>`)).join('');

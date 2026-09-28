@@ -45,6 +45,9 @@ def analyze(snapshot, *, lane, directory, session_id=None, executable='codex', t
         command+=['--json','--output-schema',str(ROOT/'schemas/ai-decision.schema.json'),'-o',str(output),'-']
         prompt=('你是此项目的只读研究分析者。不得修改源码、上传网站或运行昂贵评测。'
             '只使用提供的事实和项目自己的证据。返回符合 schema 的研究决策。'
+            '每次结果回调先整理新观测：在 summary 写清结果、相对基准及下一步；'
+            '在 conclusions 中把可核查结论与 evidence_ids 关联，并区分实测事实和待验证假设。'
+            '即使没有值得新增的目标，也要完成整理；不得编造缺失的周期、功耗或分数。'
             'decision_id 和 lane 必须原样返回；目标必须使用给定 epoch、允许域和明确 base_record。'
             '当本次 lane 为 global 时，决策顶层 lane 仍为 global，'
             '但每个 new_targets 的 lane 必须是具体研究方向，例如 p1_joint、p1_attention、p1_w2、d1_decode 或 hardware；'
