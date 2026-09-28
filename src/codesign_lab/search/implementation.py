@@ -23,7 +23,9 @@ from .targets import epoch
 CASES = {'p1': 'M1_P1', 'd1': 'M2_D1'}
 ARTIFACTS = ('hardware.json', 'programs/M1_P1.asm', 'programs/M2_D1.asm')
 TERMINAL = {'REJECTED', 'FAILED', 'LAUNCHED', 'AUDITED_NO_PROMOTION', 'BUDGET_EXHAUSTED',
-            'TARGET_QUEUED', 'TARGET_INJECTED'}
+            'TARGET_QUEUED', 'TARGET_INJECTED', 'RESEARCH_PAUSED'}
+# 只控制自动追加三个昂贵邻域点；结果和来源仍入账，AI 可以按机制重新提案。
+RESEARCH_GAIN_FLOOR = -0.02
 CONTROLLER_FILES = ('src/codesign_lab/search/implementation.py', 'src/codesign_lab/ai_bridge.py')
 
 
@@ -1014,6 +1016,16 @@ class ImplementationLoop:
                              'hbm_read_bytes': timing.get('hbm_read_bytes'),
                              'hbm_write_bytes': timing.get('hbm_write_bytes')})
                 return state
+            if gain < RESEARCH_GAIN_FLOOR:
+                research_record = record_research_candidate(
+                    snapshot, item, candidate, estimate, gain, admission=False)
+                save('RESEARCH_PAUSED', reason='单案明显退化，暂停自动邻域并等待研究判断',
+                     case_gain=gain, research_record=research_record,
+                     timing={'cycles': timing['cycles'],
+                             'peak_window_power_w': timing['peak_window_power_w'],
+                             'hbm_read_bytes': timing.get('hbm_read_bytes'),
+                             'hbm_write_bytes': timing.get('hbm_write_bytes')})
+                return state
             if gain < self.min_case_gain:
                 research_record = record_research_candidate(snapshot, item, candidate, estimate, gain)
                 save('RESEARCH_READY', case_gain=gain, research_record=research_record,
@@ -1098,7 +1110,8 @@ def main(argv=None):
         state = process_locked(loop, selected[0][1], phase=args.phase)
         print(json.dumps({'proposal_id': args.proposal_id, 'status': state['status']}, ensure_ascii=False), flush=True)
         return 0 if state['status'] in TERMINAL | {'WAITING_FOR_LAUNCH'} or \
-            args.phase == 'code' and state['status'] == 'CODED' else 75
+            args.phase == 'code' and state['status'] == 'CODED' or \
+            args.phase == 'validate' and state['status'] == 'OFFICIAL_QUEUED' else 75
     with (loop.directory / 'controller.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.retry_failed:

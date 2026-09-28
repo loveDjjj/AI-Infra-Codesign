@@ -950,7 +950,7 @@ class Pipeline:
                     # 校验不满足可恢复条件时保留原失败证据，交给全局分析。
                     state = load(state_path)
                     status = state['status']
-            if status in {'REJECTED', 'FAILED', 'WAITING_FOR_LAUNCH', 'LAUNCHED',
+            if status in {'REJECTED', 'RESEARCH_PAUSED', 'FAILED', 'WAITING_FOR_LAUNCH', 'LAUNCHED',
                           'TARGET_INJECTED',
                           'AUDITED_NO_PROMOTION'}:
                 # 同一提案的恢复验证可能产生新的事实；按持久任务身份区分，

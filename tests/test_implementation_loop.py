@@ -15,6 +15,79 @@ from codesign_lab.config import ROOT
 
 
 class ImplementationChecks(unittest.TestCase):
+    def test_validate_worker_accepts_official_handoff_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/current'
+            campaign.mkdir(parents=True)
+            (campaign / 'state.json').write_text('{}')
+            item = {'id': 'candidate', 'case': 'M1_P1'}
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'proposals', return_value=[('candidate', item)]), \
+                 patch.object(module, 'process_locked', return_value={
+                     'status': 'OFFICIAL_QUEUED'}):
+                result = module.main(['--campaign', 'current', '--proposal-id', 'candidate',
+                                      '--execute', '--worker', '--phase', 'validate'])
+            self.assertEqual(result, 0)
+
+    def test_large_single_case_regression_pauses_automatic_neighborhood(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/current'
+            campaign.mkdir(parents=True)
+            (campaign / 'state.json').write_text(json.dumps({'analysis': {'lanes': {
+                'global': {'session_id': str(uuid.uuid4())}}}}))
+            proposal = {'id': 'regressed', 'case': 'M1_P1', 'decision_id': 'decision'}
+            source = root / 'workspace/implementation-loop/current/regressed/source'
+            (source / 'workspace/implementation-input').mkdir(parents=True)
+            (source / 'workspace/implementation-input/config.json').write_text(json.dumps({
+                'hardware': {}, 'programs': {'M1_P1': {'new_switch': True}, 'M2_D1': {}}}))
+            release = source / 'data/releases/joint28/local-grade.json'
+            release.parent.mkdir(parents=True)
+            release.write_text(json.dumps({'cases': {'M1_P1': {'timing': {'cycles': 1000}}}}))
+            for name in module.ARTIFACTS:
+                path = source / 'workspace/implementation-builds/baseline' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('baseline')
+            state_path = source.parent / 'state.json'
+            state_path.write_text(json.dumps({'status': 'CODED', 'snapshot': str(source),
+                'baseline_id': 'base', 'proposal': proposal}))
+            baseline = {'id': 'base', 'candidate': 'data/releases/joint28', 'config': {
+                'hardware': {}, 'programs': {'M1_P1': {}, 'M2_D1': {}}}}
+            def artifacts(path):
+                version = 'candidate' if path.name == 'candidate' else 'baseline'
+                return {'hardware.json': 'same', 'programs/M1_P1.asm': version,
+                        'programs/M2_D1.asm': 'same'}
+            def run(_source, argv, label, **_kwargs):
+                if label == 'functional':
+                    output = source / 'workspace/implementation-reports/functional.json'
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_text(json.dumps({'cases': {'M1_P1': {'functional_passed': True}}}))
+                if label == 'estimate':
+                    output = source / 'workspace/implementation-reports/estimate.json'
+                    output.write_text(json.dumps({'cases': {'M1_P1': {'timing': {
+                        'cycles': 1100, 'peak_window_power_w': 19}}}}))
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'campaign_generator_unchanged', return_value=True), \
+                 patch.object(module, 'verify_official'), \
+                 patch.object(module, 'verify_snapshot_official'), \
+                 patch.object(module, 'validate_diff', return_value=['codegen.py']), \
+                 patch.object(module, 'preserved_fields', return_value=True), \
+                 patch.object(module, 'read', return_value=[baseline]), \
+                 patch.object(module, 'artifacts', side_effect=artifacts), \
+                 patch.object(module, 'interpreter', return_value='/test/python'), \
+                 patch.object(module, 'run', side_effect=run), \
+                 patch.object(module, 'run_regression'), \
+                 patch.object(module, 'record_research_candidate', return_value='research-id') as record, \
+                 patch.object(module.ImplementationLoop, 'finish_research') as seed:
+                result = module.ImplementationLoop(campaign).process(proposal, phase='validate')
+            self.assertEqual(result['status'], 'RESEARCH_PAUSED', result.get('error'))
+            self.assertAlmostEqual(result['case_gain'], -0.1)
+            self.assertEqual(result['research_record'], 'research-id')
+            self.assertIs(record.call_args.kwargs['admission'], False)
+            self.assertIn('RESEARCH_PAUSED', module.TERMINAL)
+            seed.assert_not_called()
+
     def test_code_phase_stops_at_coded_without_running_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
