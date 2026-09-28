@@ -4,6 +4,15 @@ from codesign_lab.search.triggers import Triggers
 
 
 class TriggerChecks(unittest.TestCase):
+    def test_structural_result_triggers_global_review_while_other_work_remains(self):
+        state = {};triggers = Triggers(state, global_only=True, batch_size=8, low_watermark=2)
+        targets = {'t': {'definition': {'lane': 'p1_w2'}, 'status': 'ACTIVE'}}
+        triggers.observe('global', {'id': 'implementation-p1', 'observation_kind': 'implementation',
+            'proposal_status': 'REJECTED', 'case': 'M1_P1'})
+        request = triggers.poll(targets, 20, now=100)[0]
+        self.assertIn('implementation_result', request['reasons'])
+        self.assertEqual(request['observation_ids'], ['implementation-p1'])
+
     def test_completion_survives_resume_and_ack_stops_retrigger(self):
         state = {};targets = {'t': {'definition': {'lane': 'p1_attention'}, 'status': 'DONE'}}
         first = Triggers(state)

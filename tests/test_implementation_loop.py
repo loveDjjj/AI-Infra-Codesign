@@ -15,6 +15,42 @@ from codesign_lab.config import ROOT
 
 
 class ImplementationChecks(unittest.TestCase):
+    def test_same_proposal_cannot_run_from_worker_and_manual_cli_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            class Loop:
+                directory = root
+                def process(self, item):
+                    raise AssertionError('重复执行')
+            loop = Loop()
+            path = root / 'same/proposal.lock'
+            path.parent.mkdir()
+            with path.open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(BlockingIOError):
+                    module.process_locked(loop, {'id': 'same'})
+
+    def test_handoff_only_launches_verified_waiting_version_after_lock_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/current'
+            campaign.mkdir(parents=True)
+            state_path = root / 'workspace/implementation-loop/current/proposal/state.json'
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps({'status': 'WAITING_FOR_LAUNCH',
+                'snapshot': str(root / 'snapshot'), 'next_settings': str(root / 'next.json')}))
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'launch_next', return_value=None) as launch:
+                self.assertTrue(module.pending_handoff(campaign))
+                self.assertIsNone(module.handoff_waiting(campaign))
+                self.assertEqual(json.loads(state_path.read_text())['status'], 'WAITING_FOR_LAUNCH')
+                launch.return_value = {'pid': 123, 'log': 'next.log'}
+                self.assertEqual(module.handoff_waiting(campaign)['pid'], 123)
+                self.assertIsNone(module.handoff_waiting(campaign))
+                self.assertFalse(module.pending_handoff(campaign))
+            self.assertEqual(json.loads(state_path.read_text())['status'], 'LAUNCHED')
+            self.assertEqual(launch.call_count, 2)
+
     def test_release_generator_restore_requires_exact_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

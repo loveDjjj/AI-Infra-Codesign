@@ -100,7 +100,12 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
         source = Path(origin)
         source = (source if source.is_absolute() else ROOT / source).resolve()
         if source != ROOT:
-            if not source.is_relative_to(ROOT / 'workspace/families') or not (source / 'src').is_dir():
+            family = source.is_relative_to(ROOT / 'workspace/families')
+            implementation = False
+            if source.is_relative_to(ROOT / 'workspace/implementation-loop'):
+                implementation = source.name == 'source' and (base.get('research_admission') is True or
+                    base.get('audited') is True and base.get('eligible') is True)
+            if not (family or implementation) or not (source / 'src').is_dir():
                 raise ValueError('历史记录来源不是可用的冻结实现族')
             files = {str(path.relative_to(source)): digest(path)
                      for path in sorted((source / 'src').rglob('*.py'))}
@@ -151,6 +156,9 @@ class TargetPool:
             'schema_version': 1, 'source_epoch': source_epoch, 'targets': {}, 'requests': {}}
         if self.state['source_epoch'] != source_epoch:
             raise ValueError('目标状态属于其他源码 epoch')
+        if self.state.get('target_limit', max_proposals) != max_proposals:
+            raise ValueError('恢复时不能改变目标池累计提案上限')
+        self.state['target_limit'] = max_proposals
         self.state.setdefault('campaign', self.directory.name)
         self.save()
 

@@ -46,14 +46,22 @@ def select_jobs(pending, active, external, workers, full_slots, memory_budget, a
     """官方验收优先，探索始终保留验收容量，实时内存不足时不启动。"""
     selected = []
     reserved = sum(x['memory_bytes'] for x in active)
-    full_count = sum(x['stage'] in {'full', 'verify', 'audit'} for x in active)
+    official = {'full', 'verify', 'audit'}
+    # 结构任务内可能进入官方整案，因此整个提案暂占验收槽；始终另留一个给普通整案。
+    full_count = sum(x['stage'] in official | {'implementation'} for x in active)
+    structure_count = sum(x['stage'] == 'implementation' for x in active)
     explore_count = len(active) - full_count + external
-    for job in sorted(pending, key=lambda x: (x['stage'] not in {'full', 'verify', 'audit'}, -x.get('priority', 0))):
+    for job in sorted(pending, key=lambda x: (0 if x['stage'] in official else
+                                             1 if x['stage'] == 'implementation' else 2,
+                                             -x.get('priority', 0))):
         if job.get('retry_after', 0) > time.time():
             continue
         if len(active) + external + len(selected) >= workers:
             break
-        if job['stage'] in {'full', 'verify', 'audit'}:
+        if job['stage'] == 'implementation':
+            if structure_count >= full_slots - 1 or full_count >= full_slots:
+                continue
+        elif job['stage'] in official:
             if full_count >= full_slots:
                 continue
         elif explore_count >= workers - full_slots:
@@ -63,8 +71,9 @@ def select_jobs(pending, active, external, workers, full_slots, memory_budget, a
         selected.append(job)
         reserved += job['memory_bytes']
         available -= job['memory_bytes']
-        if job['stage'] in {'full', 'verify', 'audit'}:
+        if job['stage'] in official | {'implementation'}:
             full_count += 1
+            structure_count += job['stage'] == 'implementation'
         else:
             explore_count += 1
     return selected
@@ -354,7 +363,7 @@ class Pipeline:
                 or job['key'] in {'build-' + identity, 'build-' + candidate.get('base_key', '')}
                 for identity, candidate in target.get('candidates', {}).items()))
             for target in self.pool.state['targets'].values())
-        if infrastructure and not stopped and not self.budget.expired() and attempt <= getattr(self.args, 'max_retries', 1):
+        if infrastructure and job['stage'] != 'implementation' and not stopped and not self.budget.expired() and attempt <= getattr(self.args, 'max_retries', 1):
             retry = dict(job, attempt=attempt + 1, retry_after=time.time() + 30 * attempt, queued_wall=time.time())
             self.persist_job(retry, 'QUEUED')
             self.pending.append(retry)
@@ -538,6 +547,7 @@ class Pipeline:
                     '提出2至4个有证据、互不重复的合法目标，并明确变量、起点、优先级和有限试验预算；'
                     '可用 available_family_bases 中的记录 ID 作为 base_record，程序会固定其冻结源码；'
                     '硬件改变必须覆盖P1和D1。若只有小收益且可表达的参数空间已经覆盖，转而提出具体实现变更假设。'
+                    '结构任务的预算耗尽和基础设施错误不是性能观测，不得据此判定结构无效。'
                     '审阅 docs/architecture.md、docs/knowledge.md、docs/automation-plan.md 与相关源码；'
                     '可以按需读取仓库文件，但不能改文件或运行昂贵评估。'
                     '不得参考其他参与者的实现或代理输出；不得把别人的成绩当成本项目事实。'
@@ -573,7 +583,8 @@ class Pipeline:
         family_bases=[{'record_id':record['id'], 'source_root':record['source_root'],
                        'cases':{case:info.get('timing',{}).get('cycles')
                                 for case,info in record.get('cases',{}).items()}}
-                      for record in rows if record.get('source_root','').startswith('workspace/families/')
+                      for record in rows if record.get('source_root','').startswith((
+                          'workspace/families/', 'workspace/implementation-loop/'))
                       and record.get('source_sha256') and isinstance(record.get('config'),dict)
                       and any(info.get('timing',{}).get('cycles') for info in record.get('cases',{}).values())]
         return {'targets':[{'target_id':key,'lane':entry['definition']['lane'],
@@ -832,8 +843,83 @@ class Pipeline:
                         pass
         return count
 
+    def process_implementations(self):
+        """把结构提案放入现有持久任务队列，由同一调度器准入和恢复。"""
+        if not getattr(self.args, 'implementation_enabled', False):
+            return
+        from .implementation import proposals, TERMINAL
+        directory = ROOT / 'workspace/implementation-loop' / self.out.name
+        lane = self.pool.state.get('analysis', {}).get('lanes', {}).get('global', {})
+        if not lane.get('session_id'):
+            return
+        active = sum(job['stage'] == 'implementation' for job in self.pending)
+        active += sum(item['job']['stage'] == 'implementation' for item in self.active.values())
+        for identifier, item in proposals(self.out):
+            if active >= self.args.implementation_max_proposals:
+                break
+            state = directory / identifier / 'state.json'
+            status = load(state).get('status') if state.exists() else 'QUEUED'
+            if status in TERMINAL | {'WAITING_FOR_LAUNCH'} or status not in {
+                    'QUEUED', 'CODED', 'GRADED', 'RESEARCH_READY'}:
+                continue
+            job_key = 'implementation-' + identifier
+            if job_key in self.seen:
+                continue
+            self.enqueue({'key': job_key, 'stage': 'implementation',
+                'proposal_id': identifier, 'priority': -1,
+                'memory_bytes': 8 * 1024**3, 'timeout': 21600,
+                'command': [self.python, '-m', 'codesign_lab.search.implementation',
+                    '--campaign', self.out.name, '--proposal-id', identifier, '--execute',
+                    '--worker', '--model', self.args.implementation_model,
+                    '--reasoning-effort', self.args.implementation_effort,
+                    '--min-case-gain', str(self.args.implementation_min_case_gain),
+                    '--min-score-gain', str(self.args.implementation_min_score_gain)]})
+            active += 1
+
     def completed(self, job, result):
         self.done.append(result)
+        if job['stage'] == 'implementation':
+            state_path = ROOT / 'workspace/implementation-loop' / self.out.name / job['proposal_id'] / 'state.json'
+            state = load(state_path) if state_path.exists() else {}
+            if state.get('status') == 'TARGET_QUEUED' and result['status'] == 'completed':
+                self.pool.consume()
+                receipt = self.pool.state.get('requests', {}).get(state['target_request_id'])
+                if receipt and receipt.get('status') in {'accepted', 'reused'}:
+                    state.update(status='TARGET_INJECTED', target_id=receipt.get('target_id'),
+                                 updated_wall=time.time())
+                    if isinstance(state.get('official_score'), (int, float)):
+                        self.initial_score = max(self.initial_score, state['official_score'])
+                else:
+                    state.update(status='FAILED', updated_wall=time.time(),
+                                 error='结构研究目标注入失败：' + str(receipt))
+                atomic_json(state_path, state)
+            if result['status'] == 'budget_exhausted' and state.get('status', 'QUEUED') == 'QUEUED':
+                state.update(status='BUDGET_EXHAUSTED', updated_wall=time.time(),
+                    error='本批次官方整案调用预算已用尽，结构提案没有启动')
+                atomic_json(state_path, state)
+            elif result['status'] != 'completed' and state.get('status') not in {
+                    'REJECTED', 'FAILED', 'WAITING_FOR_LAUNCH', 'LAUNCHED', 'AUDITED_NO_PROMOTION'}:
+                state.update(status='FAILED', updated_wall=time.time(),
+                    error='结构任务由统一监督器结束：' + result['status'] +
+                          ('；' + str(result['error']) if result.get('error') else ''))
+                atomic_json(state_path, state)
+            status = state.get('status', 'MISSING')
+            if job.get('budget_key') and not state.get('official_attempted'):
+                self.budget.reused(job['budget_key'])
+            if status in {'REJECTED', 'FAILED', 'WAITING_FOR_LAUNCH', 'LAUNCHED',
+                          'TARGET_INJECTED',
+                          'AUDITED_NO_PROMOTION'}:
+                self.triggers.observe('global', {'id': 'implementation-' + job['proposal_id'],
+                    'observation_kind': 'implementation', 'proposal_id': job['proposal_id'],
+                    'case': state.get('proposal', {}).get('case'), 'proposal_status': status,
+                    'case_gain': state.get('case_gain'), 'official_score': state.get('official_score'),
+                    'timing': state.get('timing'), 'research_record': state.get('research_record'),
+                    'target_id': state.get('target_id'),
+                    'error': state.get('error') or state.get('last_error')})
+                self.pool.save()
+            print(json.dumps({'event': 'implementation_finished', 'proposal_id': job['proposal_id'],
+                'task_status': result['status'], 'proposal_status': status}, ensure_ascii=False), flush=True)
+            return
         if job['stage'] == 'sample':
             from .adaptive import complete
             complete(self, job, result)
@@ -958,32 +1044,13 @@ class Pipeline:
 
     def run(self):
         self.prepare()
-        if getattr(self.args, 'implementation_enabled', False):
-            directory = ROOT / 'workspace/implementation-loop' / self.out.name
-            directory.mkdir(parents=True, exist_ok=True)
-            lock_path = directory / 'controller.lock'
-            with lock_path.open('a') as lock:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    pass
-                else:
-                    command = [self.python, '-m', 'codesign_lab.search.implementation',
-                        '--campaign', self.out.name, '--execute', '--watch',
-                        '--model', self.args.implementation_model,
-                        '--reasoning-effort', self.args.implementation_effort,
-                        '--max-proposals', str(self.args.implementation_max_proposals),
-                        '--min-case-gain', str(self.args.implementation_min_case_gain),
-                        '--min-score-gain', str(self.args.implementation_min_score_gain)]
-                    with (directory / 'controller.log').open('a') as log:
-                        subprocess.Popen(command, cwd=ROOT, env=self.env, stdout=log,
-                                         stderr=log, start_new_session=True)
         next_report = time.monotonic() + getattr(self.args, 'report_interval', 30)
         try:
             while True:
                 self.process_targets()
                 self.scan()
                 self.analyst.poll()
+                self.process_implementations()
                 self.trim_finalists()
                 elapsed = time.monotonic() - self.started
                 expired = self.budget.expired()
@@ -1008,7 +1075,9 @@ class Pipeline:
                         job['queue_wait_seconds'] = max(0, time.time() - job.get('queued_wall', time.time()))
                         attempt = job.get('attempt', 1)
                         job['budget_key'] = job['key'] if attempt == 1 else job['key'] + '-attempt' + str(attempt)
-                        if job['stage'] != 'audit' and not self.budget.reserve(job['budget_key'], 'case' if job['stage'] == 'functional' else job['stage']):
+                        budget_kind = ('case' if job['stage'] == 'functional' else
+                                       'full' if job['stage'] == 'implementation' else job['stage'])
+                        if job['stage'] != 'audit' and not self.budget.reserve(job['budget_key'], budget_kind):
                             self.pending.remove(job)
                             result = {'key': job['key'], 'stage': job['stage'], 'status': 'budget_exhausted', 'wall_seconds': 0}
                             atomic_json(self.out / 'jobs' / (job['key'] + '.result.json'), result)
@@ -1022,7 +1091,8 @@ class Pipeline:
                         spec = logs / (job['key'] + '.attempt' + str(attempt) + '.spec.json')
                         attempt_result = spec.with_suffix('.result.json')
                         atomic_json(spec, {'job': json.loads(json.dumps(job, default=str)),
-                            'cwd': str(ROOT), 'result': str(attempt_result), 'timeout': self.args.timeout})
+                            'cwd': str(ROOT), 'result': str(attempt_result),
+                            'timeout': job.get('timeout', self.args.timeout)})
                         self.persist_job(job, 'STARTING', spec=str(spec), attempt_result=str(attempt_result))
                         child = subprocess.Popen([self.python, '-m', 'codesign_lab.evaluation.worker', str(spec)],
                             cwd=ROOT, env=self.env, stdout=stdout, stderr=stderr, start_new_session=True)
@@ -1066,7 +1136,7 @@ class Pipeline:
                         full_slots=self.args.full_slots, external=external, memory_budget=self.memory_budget,
                         available=current_available, expired=expired),
                     'attempt_costs': attempt_costs(self.pool.state),
-                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'report','profile_build','profile']},
+                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'report','profile_build','profile','implementation']},
                     'active': [{'key': k, 'stage': x['job']['stage'], 'pid': x['pid'],
                         'start_ticks': load(Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json'))['start_ticks'] if Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json').exists() else None,
                         'queue_wait_seconds': x['job'].get('queue_wait_seconds'),
@@ -1197,6 +1267,17 @@ def main(argv=None):
     with lock_path.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         Pipeline(args).run()
+    if args.implementation_enabled:
+        from .implementation import handoff_waiting, pending_handoff
+        handoff_waiting(args.out)
+        if pending_handoff(args.out):
+            directory = ROOT / 'workspace/implementation-loop' / args.out.name
+            python, environment = runtime()
+            with (directory / 'handoff.log').open('a') as log:
+                subprocess.Popen([python,
+                    '-m', 'codesign_lab.search.implementation', '--campaign', args.out.name,
+                    '--execute', '--handoff-only', '--watch'], cwd=ROOT,
+                    env=environment, stdout=log, stderr=log, start_new_session=True)
 
 
 if __name__ == '__main__':

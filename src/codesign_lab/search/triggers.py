@@ -110,6 +110,8 @@ class Triggers:
                     revisions[identifier] = target_rev
             completed = sorted(revisions)
             reasons = self.trends(entry['observations'], new)
+            if any(item.get('observation_kind') == 'implementation' for item in new):
+                reasons.append('implementation_result')
             if any(entry['profiles'][identifier].get('status') in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_failed')
             if any(entry['profiles'][identifier].get('status') not in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_ready')
             if completed:

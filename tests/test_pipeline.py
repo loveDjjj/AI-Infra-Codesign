@@ -67,6 +67,100 @@ class PipelineChecks(unittest.TestCase):
         self.assertEqual(pipeline.select_jobs([job('g', 'full', 4)], [], 0, 4, 1, 10, 3), [])
         self.assertEqual(pipeline.select_jobs([job('g', 'full')], [job('running', 'full')], 0, 4, 1, 10, 10), [])
 
+    def test_structure_uses_same_capacity_and_preserves_one_official_slot(self):
+        selected = pipeline.select_jobs([job('search'), job('structure', 'implementation'),
+            job('grade', 'full')], [], 0, 4, 2, 10, 10)
+        self.assertEqual([item['key'] for item in selected], ['grade', 'structure', 'search'])
+        self.assertEqual(pipeline.select_jobs([job('second', 'implementation')],
+            [job('first', 'implementation')], 0, 4, 2, 10, 10), [])
+        self.assertEqual([item['key'] for item in pipeline.select_jobs([job('grade', 'full')],
+            [job('first', 'implementation')], 0, 4, 2, 10, 10)], ['grade'])
+        self.assertEqual(pipeline.select_jobs([job('structure', 'implementation')],
+            [], 0, 4, 1, 10, 10), [])
+
+    def test_structural_proposal_is_enqueued_once_after_planner_session_exists(self):
+        import codesign_lab.search.pipeline as controller_module
+        instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+        instance.args = type('Args', (), {'implementation_enabled': True,
+            'implementation_max_proposals': 2, 'implementation_model': 'gpt-6-astra',
+            'implementation_effort': 'medium', 'implementation_min_case_gain': .002,
+            'implementation_min_score_gain': 100})()
+        instance.out = Path('/tmp/structure-campaign')
+        instance.python = '/usr/bin/python3'
+        instance.pool = type('Pool', (), {'state': {'analysis': {'lanes': {}}}})()
+        instance.pending, instance.active, instance.seen = [], {}, set()
+        def enqueue(item):
+            instance.pending.append(item)
+            instance.seen.add(item['key'])
+        instance.enqueue = enqueue
+        proposals = [('first', {'id': 'first'}), ('second', {'id': 'second'})]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('codesign_lab.search.implementation.proposals', return_value=proposals), \
+             patch.object(controller_module, 'ROOT', Path(directory)):
+            instance.process_implementations()
+            self.assertEqual(instance.pending, [])
+            instance.pool.state['analysis']['lanes']['global'] = {'session_id': 'planner'}
+            instance.process_implementations()
+            instance.process_implementations()
+        self.assertEqual([item['proposal_id'] for item in instance.pending], ['first', 'second'])
+        self.assertTrue(all(item['timeout'] == 21600 for item in instance.pending))
+
+    def test_interrupted_structure_is_recorded_and_sent_to_global_analysis(self):
+        import codesign_lab.search.pipeline as controller_module
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'workspace/implementation-loop/campaign/first/state.json'
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({'status': 'CODING', 'proposal': {'case': 'M1_P1'}}))
+            instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+            instance.out = root / 'workspace/pipeline/campaign'
+            instance.done = []
+            instance.triggers = Mock()
+            instance.pool = Mock()
+            instance.budget = Mock()
+            with patch.object(controller_module, 'ROOT', root):
+                instance.completed({'stage': 'implementation', 'proposal_id': 'first',
+                    'budget_key': 'structure-budget'},
+                    {'status': 'infrastructure_failed', 'error': 'worker lost'})
+            self.assertEqual(json.loads(path.read_text())['status'], 'FAILED')
+            observation = instance.triggers.observe.call_args.args[1]
+            self.assertEqual(observation['proposal_status'], 'FAILED')
+            self.assertEqual(observation['case'], 'M1_P1')
+            instance.budget.reused.assert_called_once_with('structure-budget')
+
+    def test_structure_not_started_by_budget_limit_is_not_design_failure(self):
+        import codesign_lab.search.pipeline as controller_module
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+            instance.out = root / 'workspace/pipeline/campaign'
+            instance.done = []
+            instance.triggers = Mock()
+            instance.pool = Mock()
+            with patch.object(controller_module, 'ROOT', root):
+                instance.completed({'stage': 'implementation', 'proposal_id': 'first'},
+                    {'status': 'budget_exhausted'})
+            path = root / 'workspace/implementation-loop/campaign/first/state.json'
+            self.assertEqual(json.loads(path.read_text())['status'], 'BUDGET_EXHAUSTED')
+            instance.triggers.observe.assert_not_called()
+
+    def test_structure_keeps_full_budget_after_official_attempt(self):
+        import codesign_lab.search.pipeline as controller_module
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'workspace/implementation-loop/campaign/first/state.json'
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({'status': 'FAILED', 'official_attempted': True,
+                'proposal': {'case': 'M1_P1'}}))
+            instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+            instance.out = root / 'workspace/pipeline/campaign'
+            instance.done = []
+            instance.triggers, instance.pool, instance.budget = Mock(), Mock(), Mock()
+            with patch.object(controller_module, 'ROOT', root):
+                instance.completed({'stage': 'implementation', 'proposal_id': 'first',
+                    'budget_key': 'structure-budget'}, {'status': 'completed'})
+            instance.budget.reused.assert_not_called()
+
     def test_failed_build_never_releases_evaluation(self):
         instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
         instance.done = []

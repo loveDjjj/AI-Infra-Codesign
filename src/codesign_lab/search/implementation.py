@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,8 @@ from .targets import epoch
 
 CASES = {'p1': 'M1_P1', 'd1': 'M2_D1'}
 ARTIFACTS = ('hardware.json', 'programs/M1_P1.asm', 'programs/M2_D1.asm')
-TERMINAL = {'REJECTED', 'FAILED', 'LAUNCHED', 'AUDITED_NO_PROMOTION'}
+TERMINAL = {'REJECTED', 'FAILED', 'LAUNCHED', 'AUDITED_NO_PROMOTION', 'BUDGET_EXHAUSTED',
+            'TARGET_QUEUED', 'TARGET_INJECTED'}
 CONTROLLER_FILES = ('src/codesign_lab/search/implementation.py', 'src/codesign_lab/ai_bridge.py')
 
 
@@ -76,6 +78,14 @@ def origin_root():
     return Path(os.environ.get('CODESIGN_ORIGIN_ROOT', str(ROOT))).resolve()
 
 
+def source_reference(snapshot: Path, origin: Path):
+    """主工程内记录相对路径；隔离测试路径保留绝对身份。"""
+    try:
+        return str(snapshot.relative_to(origin))
+    except ValueError:
+        return str(snapshot)
+
+
 def audited_best_score():
     ledger = origin_root() / 'data/experiments.jsonl'
     rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
@@ -110,7 +120,9 @@ def export_epoch_record(snapshot: Path, record_id: str, parent: dict):
                     audit_path=str((target / 'local-grade.audit.json').relative_to(origin)),
                     reproduction='epoch_verified',
                     source_epoch=hashlib.sha256(json.dumps(source_files, sort_keys=True).encode()).hexdigest(),
-                    source_snapshot=str(snapshot), parent_source_epoch=parent['source_epoch'],
+                    source_snapshot=str(snapshot), source_root=source_reference(snapshot, origin),
+                    source_sha256=hashlib.sha256(json.dumps(source_files, sort_keys=True).encode()).hexdigest(),
+                    parent_source_epoch=parent['source_epoch'],
                     parent_decision=parent['decision_id'])
     ledger = origin / 'data/experiments.jsonl'
     with (origin / 'data/.experiments.lock').open('a') as lock:
@@ -151,17 +163,26 @@ def run(snapshot: Path, argv: list[str], label: str, *, timeout: int):
     out = logs / (label + '.stdout.log')
     err = logs / (label + '.stderr.log')
     with out.open('w') as stdout, err.open('w') as stderr:
+        managed = os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1'
         child = subprocess.Popen(argv, cwd=snapshot, env=project_env(snapshot),
-                                 stdout=stdout, stderr=stderr, start_new_session=True)
+                                 stdout=stdout, stderr=stderr, start_new_session=not managed)
         try:
             code = child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            terminate(child)
+            stop_stage(child)
             child.wait()
             raise TimeoutError(label + ' 超时') from None
     if code:
         raise RuntimeError(label + ' 失败；见 ' + str(err))
     return {'stdout': str(out), 'stderr': str(err)}
+
+
+def stop_stage(child):
+    """统一监督模式下终止整个结构任务进程组，避免留下昂贵孤儿仿真。"""
+    if os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1':
+        os.killpg(os.getpgrp(), signal.SIGTERM)
+        return
+    terminate(child)
 
 
 def run_regression(snapshot: Path):
@@ -469,11 +490,12 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
         logs.mkdir(parents=True, exist_ok=True)
         with (logs / 'codex.events.jsonl').open('w') as stdout, (logs / 'codex.stderr.log').open('w') as stderr:
             child = subprocess.Popen(command, cwd=snapshot, env=project_env(snapshot), stdin=subprocess.PIPE,
-                                     stdout=stdout, stderr=stderr, text=True, start_new_session=True)
+                                     stdout=stdout, stderr=stderr, text=True,
+                                     start_new_session=os.environ.get('CODESIGN_STRUCTURE_WORKER') != '1')
             try:
                 child.communicate(prompt, timeout=timeout)
             except subprocess.TimeoutExpired:
-                terminate(child)
+                stop_stage(child)
                 child.wait()
                 raise TimeoutError('结构实现 Codex 回合超时') from None
         if child.returncode:
@@ -568,6 +590,43 @@ def seed_next_campaign(snapshot: Path, item: dict, record_id: str, session_id: s
     return settings_path
 
 
+def inject_research_target(campaign: Path, item: dict, record_id: str):
+    """把已测过的结构来源交给当前主控，继续研究受影响案例的小邻域。"""
+    from .targets import DOMAINS
+    campaign_state = load(campaign / 'state.json')
+    variable = ('programs.M1_P1.config.w2_preload_k' if item['case'] == 'M1_P1'
+                else 'programs.M2_D1.config.w2_load_group_size')
+    request_id = 'structure-' + item['id']
+    target = {'schema_version': 1, 'target_id': request_id,
+        'lane': item['lane'], 'hypothesis': '结构候选功能与单案时序已通过；检查新结构与既有参数的有限交互。',
+        'base_record': record_id, 'source_epoch': campaign_state['source_epoch'],
+        'cases': [item['case']], 'variables': {variable: DOMAINS[variable]},
+        'sampler': 'enumerate', 'max_trials': len(DOMAINS[variable]),
+        'priority': .8, 'evidence_ids': [record_id]}
+    payload = {'request_id': request_id, 'command': {'op': 'add', 'target': target}}
+    path = campaign / 'inbox' / (request_id + '.json')
+    if path.exists():
+        if load(path) != payload:
+            raise ValueError('同一结构目标请求身份冲突')
+    else:
+        atomic_json(path, payload)
+    return request_id
+
+
+def same_campaign_room(campaign: Path):
+    """剩余时间和单案调用不足时，交给新批次而不注入注定无法执行的目标。"""
+    state = load(campaign / 'state.json')
+    budget = state.get('budget', {})
+    limits = budget.get('limits', {})
+    used_cases = sum(row.get('kind') == 'case' and not row.get('reused', False)
+                     for row in budget.get('reservations', {}).values())
+    allocated = sum(max(entry['definition']['max_trials'], entry.get('trials_launched', 0))
+                    for entry in state.get('targets', {}).values())
+    target_limit = state.get('target_limit', 0)
+    return budget.get('deadline', 0) - time.time() >= 600 and \
+        limits.get('case', 0) - used_cases >= 3 and target_limit - allocated >= 3
+
+
 def snapshot_epoch(snapshot: Path):
     files = {str(path.relative_to(snapshot)): digest(path)
              for path in sorted((snapshot / 'src').rglob('*.py'))}
@@ -638,7 +697,9 @@ def export_research_record(snapshot: Path, record: dict):
         shutil.copy2(report, saved_report)
     exported = dict(record, candidate=str(saved_candidate.relative_to(origin)),
                     report=str(saved_report.relative_to(origin)),
-                    source_snapshot=str(snapshot))
+                    source_snapshot=str(snapshot),
+                    source_root=source_reference(snapshot, origin),
+                    source_sha256=snapshot_epoch(snapshot))
     ledger = origin / 'data/experiments.jsonl'
     with (origin / 'data/.experiments.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -672,6 +733,29 @@ def launch_next(snapshot: Path, settings_path: Path):
     if child.poll() is not None and child.returncode:
         raise RuntimeError('新源码批次启动失败，见 ' + str(log))
     return {'pid': child.pid, 'log': str(log)}
+
+
+def handoff_waiting(campaign: Path):
+    """旧批次释放全局锁后，只交接已完成验证的结构版本。"""
+    directory = ROOT / 'workspace/implementation-loop' / campaign.name
+    if not directory.is_dir():
+        return None
+    for state_path in sorted(directory.glob('*/state.json')):
+        state = load(state_path)
+        if state.get('status') != 'WAITING_FOR_LAUNCH':
+            continue
+        launch = launch_next(Path(state['snapshot']), Path(state['next_settings']))
+        if launch is not None:
+            state.update(status='LAUNCHED', launch=launch, updated_wall=time.time())
+            atomic_json(state_path, state)
+            return launch
+    return None
+
+
+def pending_handoff(campaign: Path):
+    directory = ROOT / 'workspace/implementation-loop' / campaign.name
+    return any(load(path).get('status') == 'WAITING_FOR_LAUNCH'
+               for path in directory.glob('*/state.json')) if directory.is_dir() else False
 
 
 class ImplementationLoop:
@@ -713,6 +797,12 @@ class ImplementationLoop:
             run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'promote', record['id']],
                 'promote', timeout=600)
         export_epoch_record(snapshot, record['id'], item)
+        if os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1' and \
+                origin_root() == ROOT and same_campaign_room(self.campaign):
+            request_id = inject_research_target(self.campaign, item, record['id'])
+            save('TARGET_QUEUED', target_request_id=request_id, official_score=score,
+                 audit_record=record['id'])
+            return state
         settings = seed_next_campaign(snapshot, item, record['id'], state['session_id'])
         save('WAITING_FOR_LAUNCH', next_settings=str(settings), official_score=score,
              audit_record=record['id'])
@@ -725,6 +815,11 @@ class ImplementationLoop:
         """研究准入不冒充正式成绩；只启动一个有界的受影响案例搜索。"""
         snapshot = Path(state['snapshot'])
         try:
+            if os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1' and \
+                    origin_root() == ROOT and same_campaign_room(self.campaign):
+                request_id = inject_research_target(self.campaign, item, state['research_record'])
+                save('TARGET_QUEUED', target_request_id=request_id)
+                return state
             settings = seed_next_campaign(snapshot, item, state['research_record'], state['session_id'])
             save('WAITING_FOR_LAUNCH', next_settings=str(settings))
             launch = launch_next(snapshot, settings)
@@ -872,7 +967,7 @@ class ImplementationLoop:
                      timing={'cycles': timing['cycles'],
                              'peak_window_power_w': timing['peak_window_power_w']})
                 return self.finish_research(item, state, save)
-            save('OFFICIAL', case_gain=gain,
+            save('OFFICIAL', case_gain=gain, official_attempted=True,
                  timing={'cycles': timing['cycles'], 'peak_window_power_w': timing['peak_window_power_w']})
             report = snapshot / 'workspace/implementation-reports/official.json'
             run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'run', str(candidate),
@@ -883,6 +978,15 @@ class ImplementationLoop:
         except Exception as exc:
             save('FAILED', error=type(exc).__name__ + ': ' + str(exc))
             return state
+
+
+def process_locked(loop: ImplementationLoop, item: dict):
+    """独立 CLI 与主流水线 worker 竞争时同一提案只允许一个执行者。"""
+    directory = loop.directory / item['id']
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / 'proposal.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return loop.process(item)
 
 
 def main(argv=None):
@@ -896,6 +1000,8 @@ def main(argv=None):
     parser.add_argument('--proposal-id', help='仅运行指定结构提案，便于复核单个方向')
     parser.add_argument('--retry-failed', action='store_true',
                         help='恢复已完成编码但在默认配置复现阶段失败的提案')
+    parser.add_argument('--worker', action='store_true', help='由统一流水线准入的单提案执行者')
+    parser.add_argument('--handoff-only', action='store_true', help='只等待旧批次锁并交接已验证的新版本')
     parser.add_argument('--min-case-gain', type=float, default=.002)
     parser.add_argument('--min-score-gain', type=float, default=100)
     parser.add_argument('--model', default='gpt-6-astra')
@@ -916,10 +1022,28 @@ def main(argv=None):
         parser.error('指定的提案不属于该批次')
     if args.retry_failed and (not args.execute or not args.proposal_id):
         parser.error('--retry-failed 需要 --execute 和 --proposal-id')
+    if args.worker and (not args.execute or not args.proposal_id or args.watch or args.retry_failed):
+        parser.error('--worker 需要单个提案、--execute，且不能进入监视或手动恢复模式')
+    if args.handoff_only and (not args.execute or args.proposal_id or args.retry_failed or args.worker):
+        parser.error('--handoff-only 只允许独立执行交接')
     if not args.execute:
         print(json.dumps({'mode': '计划', 'campaign': args.campaign,
             'proposals': selected[:args.max_proposals]}, ensure_ascii=False, indent=2))
         return 0
+    if args.handoff_only:
+        with (loop.directory / 'controller.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            while pending_handoff(campaign):
+                if handoff_waiting(campaign) is not None:
+                    return 0
+                if not args.watch:
+                    break
+                time.sleep(args.poll_seconds)
+        return 0
+    if args.worker:
+        state = process_locked(loop, selected[0][1])
+        print(json.dumps({'proposal_id': args.proposal_id, 'status': state['status']}, ensure_ascii=False), flush=True)
+        return 0 if state['status'] in TERMINAL | {'WAITING_FOR_LAUNCH'} else 75
     with (loop.directory / 'controller.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.retry_failed:
@@ -935,7 +1059,7 @@ def main(argv=None):
                 previous = load(path).get('status') if path.is_file() else 'QUEUED'
                 if previous in TERMINAL:
                     continue
-                state = loop.process(item)
+                state = process_locked(loop, item)
                 if previous == 'QUEUED' and state['status'] != 'QUEUED':
                     started += 1
                 if state['status'] not in TERMINAL:
