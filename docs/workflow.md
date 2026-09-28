@@ -40,4 +40,4 @@
 
 课程包必须包含 ZIP 根目录的 `local-grade.json`、`hardware.json`、两份 ASM，以及 `project/iteration-log.md` 与完整代理轨迹。`package` 和 `verify` 不上传网站。网站上传受至少提高 1000 分、间隔至少 10 分钟的脚本规则约束；回执只保存在本机 `data/submissions/`。GitHub 推送与课程网站提交是两件事。
 
-源码、配置、四份核心文档、测试和轻量账本进入 Git；`data/agent-trace/`、`data/releases/`、提交 ZIP、官方起始包及工作区大原件不进入 Git。克隆仓库后须另外恢复受保护材料才能复现最高分和打出课程 ZIP。资源忙碌比例只支持瓶颈假设，不能当成已证明的因果等待。
+源码、当前配置、核心文档、测试和轻量账本进入 Git；配置命名与保留规则见 [configs/README.md](../configs/README.md)。旧批次 YAML 不长期保留，历史结论从实验账本和决策账本读取。`data/agent-trace/`、`data/releases/`、提交 ZIP、官方起始包及工作区大原件不进入 Git。课程明确要求完整代理会话轨迹，因此轨迹虽不作为 AI 日常搜索输入，仍须在提交包中保留。独立规划、编码调用只把会话 ID 写入 `data/agent-trace/session-links.jsonl`，详细调用日志放在可清理的 `workspace/agent-calls/`；打包时按 ID 导出原生会话，清单也覆盖根会话树。克隆仓库后须另外恢复受保护材料才能复现最高分和打出课程 ZIP。资源忙碌比例只支持瓶颈假设，不能当成已证明的因果等待。

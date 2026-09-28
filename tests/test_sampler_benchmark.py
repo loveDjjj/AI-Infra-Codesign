@@ -11,7 +11,7 @@ from codesign_lab.search.scheduler import atomic_json
 
 class SamplerBenchmarkChecks(unittest.TestCase):
     def test_small_budget_or_single_seed_is_not_algorithm_comparison(self):
-        config=load(ROOT/'configs/benchmark-samplers.yaml')
+        config=load(ROOT/'tests/fixtures/sampler-benchmark.yaml')
         with tempfile.TemporaryDirectory(dir=ROOT/'workspace/pipeline') as directory:
             out=Path(directory);path=out/'config.json'
             for changes in [{'trials':12},{'seeds':[7]},{'trials':36}]:

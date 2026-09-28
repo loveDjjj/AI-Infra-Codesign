@@ -10,6 +10,7 @@ import uuid
 from .config import ROOT, load
 from .search.decisions import schema_check
 from .search.scheduler import terminate
+from .traces import register_sessions
 
 
 def capabilities(executable='codex'):
@@ -94,7 +95,8 @@ def analyze(snapshot, *, lane, directory, session_id=None, executable='codex', t
 
 def write_trace(lane,attempt,stdout,stderr):
     origin=Path(os.environ.get('CODESIGN_ORIGIN_ROOT',str(ROOT))).resolve()
-    destination=origin/'data/agent-trace/pipeline'/lane
+    destination=origin/'workspace/agent-calls/pipeline'/lane
     destination.mkdir(parents=True,exist_ok=True)
     (destination/(attempt+'.events.jsonl')).write_text(stdout)
     (destination/(attempt+'.stderr.log')).write_text(stderr)
+    register_sessions(origin/'data/agent-trace', stdout, role='planner', key=lane+'/'+attempt)

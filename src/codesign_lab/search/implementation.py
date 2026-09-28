@@ -17,6 +17,7 @@ import time
 
 from ..config import ROOT, digest, load, verify_official
 from ..records import read
+from ..traces import register_sessions
 from .scheduler import atomic_json, terminate
 from .targets import epoch
 
@@ -297,14 +298,6 @@ def snapshot_project(destination: Path, baseline: dict):
     for name in ('iteration-log.md', 'official-starter.zip'):
         if (ROOT / 'data' / name).exists():
             shutil.copy2(ROOT / 'data' / name, destination / 'data' / name)
-    (destination / 'data/agent-trace/pipeline').mkdir(parents=True)
-    trace_origin = origin_root() / 'data/agent-trace'
-    for relative in ('pipeline/global', 'implementation'):
-        target = trace_origin / relative
-        target.mkdir(parents=True, exist_ok=True)
-        link = destination / 'data/agent-trace' / relative
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(target, target_is_directory=True)
     (destination / 'workspace/pipeline').mkdir(parents=True)
     (destination / 'workspace/families').mkdir(parents=True)
     search_python = load(ROOT / 'configs/search-toolchain.yaml')['python']
@@ -541,7 +534,7 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
         command = [executable, 'exec', '--sandbox', 'workspace-write', '-C', str(snapshot),
                    '-m', model, '-c', 'model_reasoning_effort="' + effort + '"',
                    '--json', '-o', str(output), '-']
-        logs = origin_root() / 'data/agent-trace/implementation' / item['id']
+        logs = origin_root() / 'workspace/agent-calls/implementation' / item['id']
         logs.mkdir(parents=True, exist_ok=True)
         with (logs / 'codex.events.jsonl').open('w') as stdout, (logs / 'codex.stderr.log').open('w') as stderr:
             child = subprocess.Popen(command, cwd=snapshot, env=project_env(snapshot), stdin=subprocess.PIPE,
@@ -553,9 +546,12 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
                 stop_stage(child)
                 child.wait()
                 raise TimeoutError('结构实现 Codex 回合超时') from None
+        event_text = (logs / 'codex.events.jsonl').read_text()
+        register_sessions(origin_root() / 'data/agent-trace', event_text,
+                          role='coder', key=item['id'])
         if child.returncode:
-            raise RuntimeError('结构实现 Codex 回合失败，见受保护轨迹')
-        events = [json.loads(line) for line in (logs / 'codex.events.jsonl').read_text().splitlines()
+            raise RuntimeError('结构实现 Codex 回合失败，见工作区调用日志及会话索引')
+        events = [json.loads(line) for line in event_text.splitlines()
                   if line.startswith('{')]
         seen = {event.get('thread_id') for event in events if event.get('type') == 'thread.started'}
         if len(seen) != 1 or not any(event.get('type') == 'turn.completed' for event in events):
@@ -599,7 +595,7 @@ def retry_infrastructure_failure(state_path: Path):
 
 
 def seed_next_campaign(snapshot: Path, item: dict, record_id: str, session_id: str):
-    settings = load(snapshot / 'configs/pipeline-astra-global-v2.yaml')
+    settings = load(snapshot / 'configs/pipeline.yaml')
     settings['out'] = 'workspace/pipeline/epoch-' + item['id']
     settings['watch'] = []
     settings['stay_open'] = False
@@ -614,18 +610,16 @@ def seed_next_campaign(snapshot: Path, item: dict, record_id: str, session_id: s
     atomic_json(settings_path, settings)
     from .targets import DOMAINS
     source = snapshot_epoch(snapshot)
-    name = 'p1-preload.yaml' if item['case'] == 'M1_P1' else 'd1-w2-group.yaml'
-    path = snapshot / 'configs/targets/astra-global-v2' / name
-    if not path.is_file():
-        raise ValueError('新源码批次缺少受影响案例的初始目标模板')
-    target = load(path)
     variable = ('programs.M1_P1.config.w2_preload_k' if item['case'] == 'M1_P1'
                 else 'programs.M2_D1.config.w2_load_group_size')
-    target.update(target_id='epoch-' + item['id'][:8] + '-' + target['lane'],
-                  source_epoch=source, base_record=record_id, evidence_ids=[record_id],
-                  hypothesis='新结构首个正确单案后的有界邻域；只检查受影响案例与新数据流的交互。',
-                  variables={variable: DOMAINS[variable]}, max_trials=len(DOMAINS[variable]),
-                  max_inflight=len(DOMAINS[variable]))
+    lane = 'p1_w2' if item['case'] == 'M1_P1' else 'd1_decode'
+    target = {'schema_version': 1, 'target_id': 'epoch-' + item['id'][:8] + '-' + lane,
+              'lane': lane, 'source_epoch': source, 'base_record': record_id,
+              'evidence_ids': [record_id], 'cases': [item['case']],
+              'hypothesis': '新结构首个正确单案后的有界邻域；只检查受影响案例与新数据流的交互。',
+              'variables': {variable: DOMAINS[variable]}, 'sampler': 'enumerate',
+              'priority': .8, 'max_trials': len(DOMAINS[variable]),
+              'max_inflight': len(DOMAINS[variable])}
     targets = [target]
     if not targets:
         raise ValueError('新源码批次没有可验证的初始目标')

@@ -9,11 +9,23 @@ import time
 import unittest
 import uuid
 from types import SimpleNamespace
+from unittest.mock import patch
 from codesign_lab.config import ROOT
 from codesign_lab.search.analysis_jobs import AnalysisCall,prepare
 
 
 class AnalysisRecoveryChecks(unittest.TestCase):
+    def setUp(self):
+        # 假 CLI 的轨迹只属于本测试，不进入受保护的课程会话目录。
+        self.trace_directory = tempfile.TemporaryDirectory()
+        self.origin_patch = patch.dict(
+            os.environ, {'CODESIGN_ORIGIN_ROOT': self.trace_directory.name})
+        self.origin_patch.start()
+
+    def tearDown(self):
+        self.origin_patch.stop()
+        self.trace_directory.cleanup()
+
     def fixture(self, root, fail=False):
         session=str(uuid.uuid4());calls=root/'calls';cli=root/'fake-codex'
         cli.write_text('#!'+sys.executable+'\n'+f'''

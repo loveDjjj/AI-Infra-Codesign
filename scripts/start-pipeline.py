@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""等待算法对照退出，再启动有预算的 Sol 长期搜索；默认只检查计划。"""
+"""启动当前流水线；可指定本源码批次的初始目标，默认只检查计划。"""
 import argparse
 import fcntl
 import json
@@ -32,18 +32,19 @@ def busy(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--config', type=Path, default=ROOT / 'configs/pipeline.yaml')
+    parser.add_argument('--target', type=Path, action='append', default=[])
     args = parser.parse_args()
-    config = ROOT / 'configs/pipeline-astra-long.yaml'
-    targets = sorted((ROOT / 'configs/targets').glob('astra-*.yaml'))
-    wrapper = ROOT / 'scripts/codex-analyst/codex'
+    config = args.config.resolve()
+    targets = [path.resolve() for path in args.target]
     settings = load(config)
     out = ROOT / settings['out']
     source = epoch()
     official = verify_official()
-    pinned = {str(p.relative_to(ROOT)): digest(p) for p in [config, wrapper, *targets]}
+    pinned = {str(p): digest(p) for p in [config, *targets]}
     definitions = [validate_target(load(p), source, max_trials=settings['budget']['max_proposals'])[0] for p in targets]
     argv = arguments(config, execute=True)
-    plan = {'model': 'gpt-6-sol', 'reasoning_effort': 'medium',
+    plan = {'model': settings['ai'].get('model'), 'reasoning_effort': settings['ai'].get('reasoning_effort'),
             'out': str(out), 'targets': [t['target_id'] for t in definitions],
             'initial_nominal_candidates': sum(t['max_trials'] for t in definitions),
             'source_epoch': source, 'input_hashes': pinned, 'budget': settings['budget'],
@@ -56,12 +57,11 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         atomic_json(out / 'launch-plan.json', plan)
         status = out / 'launch-state.json'
-        gates = [ROOT / 'workspace/pipeline/sampler-benchmark-v3/controller.lock',
-                 ROOT / 'workspace/search/.pipeline.lock']
+        gates = [ROOT / 'workspace/search/.pipeline.lock']
         queued_wall = time.time()
         try:
             while any(busy(gate) for gate in gates):
-                if epoch() != source or any(digest(ROOT / name) != sha for name, sha in pinned.items()):
+                if epoch() != source or any(digest(Path(name)) != sha for name, sha in pinned.items()):
                     raise ValueError('等待期间源码或启动输入改变，拒绝启动旧计划')
                 atomic_json(status, {'status': 'WAITING_FOR_BENCHMARK_OR_PIPELINE',
                     'queued_wall': queued_wall, 'updated_wall': time.time(),
@@ -69,7 +69,7 @@ def main():
                 time.sleep(10)
             if epoch() != source or verify_official() != official:
                 raise ValueError('启动时源码或官方身份改变')
-            if any(digest(ROOT / name) != sha for name, sha in pinned.items()):
+            if any(digest(Path(name)) != sha for name, sha in pinned.items()):
                 raise ValueError('启动配置或模型包装器身份改变')
             pool = TargetPool(out, source, max_proposals=settings['budget']['max_proposals'])
             for target in definitions:
@@ -77,15 +77,7 @@ def main():
                     'command': {'op': 'add', 'target': target}})
                 if result['status'] not in {'accepted', 'reused'}:
                     raise ValueError(result)
-            # 原 D1 研究会话在真实 Sol medium 切换验证后才可复用。
-            switch = ROOT / 'workspace/pipeline/sol-medium-model-switch-v1/proof.json'
-            if switch.exists() and load(switch).get('passed') is True:
-                from codesign_lab.search.triggers import Triggers
-                entry = Triggers(pool.state).lane('d1_decode')
-                entry.setdefault('session_id', load(switch)['session_id'])
-                pool.save()
             env = os.environ.copy()
-            env['PATH'] = str(wrapper.parent) + os.pathsep + env['PATH']
             env['PYTHONPATH'] = str(ROOT / 'src')
             env['OPENBLAS_NUM_THREADS'] = env['OMP_NUM_THREADS'] = '1'
             python = load(ROOT / 'configs/toolchain.yaml')['python']

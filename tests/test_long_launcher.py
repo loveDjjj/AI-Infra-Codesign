@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from codesign_lab.config import ROOT
 
-spec = importlib.util.spec_from_file_location('long_launcher', ROOT / 'scripts/start-long-optimization.py')
+spec = importlib.util.spec_from_file_location('pipeline_launcher', ROOT / 'scripts/start-pipeline.py')
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
 

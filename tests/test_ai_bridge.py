@@ -29,9 +29,18 @@ class BridgeChecks(unittest.TestCase):
         import os
         with tempfile.TemporaryDirectory() as directory,patch.dict(os.environ,{'CODESIGN_ORIGIN_ROOT':directory}):
             write_trace('global','attempt-1','event\n','error\n')
-            target=Path(directory)/'data/agent-trace/pipeline/global'
+            target=Path(directory)/'workspace/agent-calls/pipeline/global'
             self.assertEqual((target/'attempt-1.events.jsonl').read_text(),'event\n')
             self.assertEqual((target/'attempt-1.stderr.log').read_text(),'error\n')
+
+    def test_trace_registers_native_session_without_copying_events(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory,patch.dict(os.environ,{'CODESIGN_ORIGIN_ROOT':directory}):
+            event=json.dumps({'type':'thread.started','thread_id':SESSION})+'\n'
+            write_trace('global','attempt-1',event,'')
+            links=Path(directory)/'data/agent-trace/session-links.jsonl'
+            self.assertEqual(json.loads(links.read_text())['thread_id'],SESSION)
+            self.assertFalse((Path(directory)/'data/agent-trace/pipeline').exists())
 
     def test_resume_same_session_and_returns_decision(self):
         with tempfile.TemporaryDirectory() as directory,patch('codesign_lab.ai_bridge.capabilities',return_value={'version':'fake'}),patch('codesign_lab.ai_bridge.subprocess.Popen',side_effect=FakeProcess) as launched,patch('codesign_lab.ai_bridge.write_trace'):

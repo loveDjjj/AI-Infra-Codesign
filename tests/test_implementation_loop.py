@@ -504,13 +504,9 @@ class ImplementationChecks(unittest.TestCase):
     def test_next_epoch_only_seeds_affected_case_neighborhood(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory)
-            for name in ('p1-preload.yaml', 'd1-w2-group.yaml'):
-                source = ROOT / 'configs/targets/astra-global-v2' / name
-                target = snapshot / 'configs/targets/astra-global-v2' / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read_bytes())
-            settings = snapshot / 'configs/pipeline-astra-global-v2.yaml'
-            settings.write_bytes((ROOT / 'configs/pipeline-astra-global-v2.yaml').read_bytes())
+            settings = snapshot / 'configs/pipeline.yaml'
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_bytes((ROOT / 'configs/pipeline.yaml').read_bytes())
             source = snapshot / 'src/codesign_lab/codegen/one.py'
             source.parent.mkdir(parents=True)
             source.write_text('x=1\n')
