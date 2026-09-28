@@ -163,6 +163,4 @@ def execute(path, output, *, workers=None, resume=False):
             'pruned': pruned, 'duplicate_tasks': duplicates, 'unchanged_cases': unchanged,
             'resumed_reports': reused, 'evaluation_calls': len(jobs), 'observations': observations}
         atomic_json(output / 'summary.json', summary)
-        from ..report import generate
-        generate()
         return summary

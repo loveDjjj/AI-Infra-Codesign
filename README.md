@@ -11,19 +11,18 @@
 | 理解代码与数据归属 | [架构](docs/architecture.md) |
 | 构建、评估、发布与恢复 | [工作流程](docs/workflow.md) |
 | 查优化结论及适用范围 | [研究经验](docs/knowledge.md) |
-| 看下一轮工程优先级 | [自动化方案](docs/automation-plan.md) 与 [路线图](docs/roadmap.md) |
-| 看本次仓库整理依据 | [仓库审计](docs/repository-audit.md) |
+| 看下一轮工程优先级与清理规则 | [自动化方案](docs/automation-plan.md) |
 | 看课程原文快照 | [课程材料](docs/assignment/homework-announcement.md) |
 
 ```bash
 # 使用本机锁定环境；克隆后需按课程来源恢复原始官方包和环境。
 ./lab build configs/best.yaml --out workspace/builds/current
 ./lab run workspace/builds/current --level functional --out workspace/evaluations/functional.json
-./lab report
 ./lab dashboard --host 0.0.0.0 --port 8765      # 实时看板；浏览器打开 http://服务器地址:8765/
 ./lab pipeline configs/pipeline.yaml                 # 只检查计划
 ./lab pipeline configs/pipeline.yaml --execute       # 显式执行
-./lab family-restore official-1790581630771528243 --out workspace/families/official-1790581630771528243  # 恢复已审计实现族
+./lab clean --dry-run                               # 按目录查看清理计划
+./lab clean --apply                                 # 压缩历史账本并清理旧产物
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
 ```
 
@@ -32,9 +31,9 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
 ## 三种保存边界
 
 - **GitHub**：当前源码、配置、测试、文档，以及轻量实验账本、决策和课程迭代记录。
-- **本机 `data/`**：完整代理轨迹、官方原始包、关键发布原件与隔离源码证据；这些材料受保护，不能按临时文件清理。Git 忽略它们，但 `lab package` 会从本机选取课程所需材料。
-- **`workspace/`**：隔离源码、评估缓存、运行状态、日志和生成看板的中间数据。它不入 Git，也不能成为唯一证据来源。`lab clean --dry-run` 只列出清理预览。
+- **本机 `data/`**：完整课程代理轨迹、官方原始包、最高分及其两案来源、已晋升基线与回退原件；其他实验只留账本指标。Git 忽略大原件，`lab package` 从本机选取课程材料。
+- **`workspace/`**：构建、缓存、运行状态和日志，不入 Git。清理会保留全局 AI 会话指针及独立搜索环境。
 
-当前最高分属于隔离源码 epoch，因此根目录 `lab package` 的逐字节再生条件尚不满足；从对应 epoch 打包前应先复核其源码、官方报告及课程 ZIP 限制。不要把 49,283 分版本误称为根目录 `best.yaml`。
+当前最高分是跨源码组合，可用受保护的两案源码归档独立再生并打包；根目录 `best.yaml` 仍是 joint28。清理前已对最高分包完成三份产物逐字节再生验证。
 
 网站上传是单独动作：`scripts/submit.py` 默认只做本地检查，只有显式 `--submit` 才上传；上传规则见 [工作流程](docs/workflow.md)。

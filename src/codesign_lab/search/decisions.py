@@ -53,6 +53,20 @@ def append_decision(record):
             stream.write(json.dumps(record,ensure_ascii=False,allow_nan=False)+'\n');stream.flush();os.fsync(stream.fileno())
 
 
+def compact_observation(item):
+    """AI 决策只固化可核对的摘要，不复制时序资源日历。"""
+    from ..records import compact_record
+    if not isinstance(item,dict):return item
+    value=compact_record(item)
+    if isinstance(value.get('timing'),dict):
+        value['timing']={key:content for key,content in value['timing'].items()
+                         if key!='resource_stats'}
+    if isinstance(value.get('evidence_snapshot'),dict):
+        value['evidence_snapshot']={key:compact_observation(content)
+                                    for key,content in value['evidence_snapshot'].items()}
+    return value
+
+
 def apply_decision(pool,triggers,decision):
     schema_check(decision,load(ROOT/'schemas/ai-decision.schema.json'))
     identifier=decision['decision_id'];lane=decision['lane']
@@ -106,7 +120,8 @@ def apply_decision(pool,triggers,decision):
     cited={identity for item in decision['conclusions']+decision['implementation_proposals']
            for identity in item['evidence_ids']}
     record={'id':identifier,'lane':lane,'source_epoch':pool.source_epoch,'decision':decision,
-            'evidence_snapshot':{identity: observed[identity] for identity in cited & set(observed)}}
+            'evidence_snapshot':{identity: compact_observation(observed[identity])
+                                 for identity in cited & set(observed)}}
     staged.state.setdefault('applied_decisions',{})[identifier]=record
     pool.state.clear();pool.state.update(staged.state)
     # triggers 的引用重新指向事务提交后的状态，不能保留旧字典。

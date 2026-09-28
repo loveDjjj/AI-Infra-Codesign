@@ -23,7 +23,8 @@ def main():
     p=sub.add_parser('audit');p.add_argument('id')
     p=sub.add_parser('verify');p.add_argument('archive',type=Path)
     p=sub.add_parser('package');p.add_argument('id');p.add_argument('--out',type=Path,required=True)
-    p=sub.add_parser('clean');p.add_argument('--dry-run',action='store_true',required=True)
+    p=sub.add_parser('clean');mode=p.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--dry-run',action='store_true');mode.add_argument('--apply',action='store_true')
     p=sub.add_parser('profile');p.add_argument('candidate',type=Path);p.add_argument('--case',required=True);p.add_argument('--compare',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     args=parser.parse_args()
     if args.command=='dashboard':
@@ -112,9 +113,6 @@ def main():
             cases={case:{key:value for key,value in info.items() if key!='timing'}|{'timing':{key:value for key,value in info.get('timing',{}).items() if key!='resource_stats'}} for case,info in report.get('cases',{}).items()}
             profiles={case:{key:value for key,value in summarize(info['timing']).items() if key!='timeline'} for case,info in report.get('cases',{}).items() if 'resource_stats' in info.get('timing',{})}
             append({'id':args.out.stem+'-'+str(time.time_ns()),'scope':args.level,'cases':cases,'profile':profiles,'config':config,'eligible':report.get('eligible'),'score':report.get('experimental_score'),'audited':False,'reproduction':'record_only','report':reference(args.out),'candidate':reference(args.candidate),'provenance':report.get('provenance'),'host_seconds':time.monotonic()-start})
-        if args.command=='run':
-            from .report import generate
-            generate()
         return code
     elif args.command=='report':
         from .report import generate
@@ -140,8 +138,8 @@ def main():
         from .release import promote
         result=promote(args.id)
     else:
-        from .release import clean
-        result=clean()
+        from .maintenance import plan,apply
+        result=apply() if args.apply else plan()
     print(json.dumps(result,ensure_ascii=False,indent=2))
     return 0
 if __name__=='__main__':raise SystemExit(main())

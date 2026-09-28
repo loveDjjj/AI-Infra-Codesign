@@ -563,7 +563,8 @@ class Pipeline:
                     '优先找可能带来百分比级收益的结构与交互，而非反复追逐千分之一的参数抖动。'
                     '如果当前目标仍在运行，允许先分析已完成方向并提出不同方向的互补目标，不要等待整池清空。'
                     '提出2至4个有证据、互不重复的合法目标，并明确变量、起点、优先级和有限试验预算；'
-                    '可用 available_family_bases 中的记录 ID 作为 base_record，程序会固定其冻结源码；'
+                    '只能从 available_base_records 选择参数目标的 base_record；最高分跨源码组合只用于整案比较，'
+                    '不能当作单生成器搜索起点。没有可用新参数时请提出结构假设。'
                     '硬件改变必须覆盖P1和D1。若只有小收益且可表达的参数空间已经覆盖，转而提出具体实现变更假设。'
                     '结构任务的预算耗尽和基础设施错误不是性能观测，不得据此判定结构无效。'
                     '审阅 docs/architecture.md、docs/knowledge.md、docs/automation-plan.md 与相关源码；'
@@ -605,12 +606,19 @@ class Pipeline:
                           'workspace/families/', 'workspace/implementation-loop/'))
                       and record.get('source_sha256') and isinstance(record.get('config'),dict)
                       and any(info.get('timing',{}).get('cycles') for info in record.get('cases',{}).values())]
+        promoted=load(ROOT/'data/state.json').get('promoted_record')
+        available=[record['id'] for record in rows if isinstance(record.get('config'),dict)
+                   and record.get('source_available') is not False
+                   and record.get('reproduction')!='verified_composite'
+                   and (record['id']==promoted or record.get('candidate') and
+                        (ROOT/record['candidate']).exists())]
         return {'targets':[{'target_id':key,'lane':entry['definition']['lane'],
                     'status':entry['status'],'variables':entry['definition']['variables'],
                     'proposed':entry.get('trials_launched'),'completed':entry.get('trials_completed')}
                     for key,entry in self.pool.state['targets'].items()],
                 'case_facts':facts[-80:],
                 'available_family_bases':family_bases[-8:],
+                'available_base_records':available[-12:],
                 'best_audited':[{'record_id':record['id'],'score':record['score']}
                                 for record in audited]}
 
@@ -1130,7 +1138,6 @@ class Pipeline:
 
     def run(self):
         self.prepare()
-        next_report = time.monotonic() + getattr(self.args, 'report_interval', 30)
         try:
             while True:
                 self.process_targets()
@@ -1140,12 +1147,6 @@ class Pipeline:
                 self.trim_finalists()
                 elapsed = time.monotonic() - self.started
                 expired = self.budget.expired()
-                if not expired and time.monotonic() >= next_report and not any(
-                    job['stage'] == 'report' for job in self.pending + [item['job'] for item in self.active.values()]):
-                    self.enqueue({'key': 'report-' + str(time.time_ns()), 'stage': 'report',
-                        'priority': -1, 'memory_bytes': 512 * 1024**2,
-                        'command': [self.python, '-m', 'codesign_lab.cli', 'report']})
-                    next_report = time.monotonic() + getattr(self.args, 'report_interval', 30)
                 if source_identity() != self.source:
                     raise ValueError('源码在运行期间改变，停止流水线')
                 if any(source_identity_at(Path(source)) != identity
@@ -1255,8 +1256,6 @@ class Pipeline:
             self.pool.save()
         verify_official()
         atomic_json(self.out / 'summary.json', {'jobs': self.done, 'remaining': [x['key'] for x in self.pending], 'wall_seconds': time.monotonic()-self.started})
-        from codesign_lab.report import generate
-        generate()
 
 
 def main(argv=None):

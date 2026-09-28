@@ -480,8 +480,8 @@ class ImplementationChecks(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(len(exported), 1)
             self.assertEqual(rows[0]['report'], 'workspace/estimate.json')
-            self.assertTrue((origin / exported[0]['report']).is_file())
-            self.assertEqual(exported[0]['candidate'], 'data/evidence/research/research-structure-1/candidate')
+            self.assertTrue(Path(exported[0]['report']).is_file())
+            self.assertEqual(exported[0]['candidate'], str(candidate))
             self.assertIsNone(rows[0]['score'])
 
             power_report = snapshot / 'workspace/power-estimate.json'
@@ -499,7 +499,7 @@ class ImplementationChecks(unittest.TestCase):
             self.assertIs(power_record['eligible'], False)
             self.assertIs(power_record['research_admission'], False)
             self.assertNotIn('resource_stats', power_record['cases']['M1_P1']['timing'])
-            self.assertTrue((origin / power_record['report']).is_file())
+            self.assertTrue(Path(power_record['report']).is_file())
 
     def test_next_epoch_only_seeds_affected_case_neighborhood(self):
         with tempfile.TemporaryDirectory() as directory:

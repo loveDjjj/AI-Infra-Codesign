@@ -95,6 +95,10 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
     base = by_id.get(target['base_record'])
     if not base or not isinstance(base.get('config'), dict):
         raise ValueError('base_record 不存在或缺少完整配置')
+    if base.get('source_available') is False:
+        raise ValueError('历史源码已清理；请先从受保护 release 恢复实现族')
+    if base.get('reproduction')=='verified_composite':
+        raise ValueError('跨源码组合不是单一生成器目标基线；请分别选择可再生的 P1/D1 实现族')
     origin = base.get('source_root')
     if origin:
         source = Path(origin)

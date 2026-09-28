@@ -731,31 +731,21 @@ def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estim
 
 
 def export_research_record(snapshot: Path, record: dict):
-    """主账本只收轻量事实；原始单案报告和构建产物保存在一份证据目录。"""
+    """研究结果只入轻量账本；原件留在可清理的隔离工作区。"""
     origin = origin_root()
     if origin == snapshot:
         return
     identifier = record['id']
     candidate = snapshot / record['candidate']
     report = snapshot / record['report']
-    target = origin / 'data/evidence/research' / identifier
-    target.mkdir(parents=True, exist_ok=True)
-    saved_candidate = target / 'candidate'
-    if not saved_candidate.exists():
-        shutil.copytree(candidate, saved_candidate)
-    if artifacts(saved_candidate) != record['artifact_sha256']:
-        raise ValueError('主工程研究证据与隔离产物哈希不一致')
-    saved_report = target / 'estimate.json'
-    if saved_report.exists():
-        if digest(saved_report) != digest(report):
-            raise ValueError('主工程已有不同内容的研究报告')
-    else:
-        shutil.copy2(report, saved_report)
-    exported = dict(record, candidate=str(saved_candidate.relative_to(origin)),
-                    report=str(saved_report.relative_to(origin)),
+    if artifacts(candidate) != record['artifact_sha256'] or not report.is_file():
+        raise ValueError('研究程序或报告缺失，禁止只登记推测指标')
+    from ..records import compact_record
+    exported = compact_record(dict(record, candidate=source_reference(candidate, origin),
+                    report=source_reference(report, origin),
                     source_snapshot=str(snapshot),
                     source_root=source_reference(snapshot, origin),
-                    source_sha256=snapshot_epoch(snapshot))
+                    source_sha256=snapshot_epoch(snapshot)))
     ledger = origin / 'data/experiments.jsonl'
     with (origin / 'data/.experiments.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

@@ -2,9 +2,6 @@ from .config import ROOT,load,digest,verify_official,reference,resolve_reference
 import json
 from .records import read,state
 
-def clean():
-    '只预览明确的清理清单，不遍历长期数据目录。'
-    return [{'path':str(p),'bytes':p.stat().st_size,'reason':'temporary workspace artifact'} for p in (ROOT/'workspace').rglob('*') if p.is_file() and not p.is_symlink()]
 def retain_release(record):
     '晋升前保存独立证据，使版本不依赖可丢弃的工作区文件。'
     from pathlib import Path

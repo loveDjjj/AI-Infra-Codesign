@@ -27,6 +27,16 @@ class TargetsChecks(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_target(target, 'epoch-a', self.records)
 
+    def test_cleaned_or_composite_base_cannot_use_current_generator(self):
+        record=copy.deepcopy(self.records[0])
+        record['source_available']=False
+        with self.assertRaisesRegex(ValueError,'历史源码已清理'):
+            validate_target(self.target,'epoch-a',[record])
+        record.pop('source_available')
+        record['reproduction']='verified_composite'
+        with self.assertRaisesRegex(ValueError,'跨源码组合'):
+            validate_target(self.target,'epoch-a',[record])
+
     def test_injected_request_survives_restart_and_duplicate_is_idempotent(self):
         root = ROOT / 'workspace/pipeline';root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=root) as directory, patch('codesign_lab.search.targets.read', return_value=self.records):
