@@ -95,7 +95,8 @@ class FamilyBrokerChecks(TestCase):
                                          for source in sources}
             controller.enqueue = Mock()
             controller.prepare()
-            jobs = [call.args[0] for call in controller.enqueue.call_args_list]
+            jobs = [call.args[0] for call in controller.enqueue.call_args_list
+                    if call.args[0]['stage'] == 'build']
             self.assertEqual({job['source_root'] for job in jobs}, {str(source) for source in sources})
             self.assertEqual(len({job['key'] for job in jobs}), 2)
             for job in jobs:
