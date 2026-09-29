@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "hypotheses": [
+    {
+      "transformation_id": "p1-w2-nk-tree-reduction-v2",
+      "lane": "p1_w2",
+      "parent_record": "research-0cb76e11b1d15cb88dc3",
+      "evidence_ids": [
+        "research-0cb76e11b1d15cb88dc3"
+      ],
+      "proposal": "从已准入的 W2 N/K 四路滚动归并 M16 研究版继续，不允许退回全局最佳生成器。仅改变四路 partial 的归并拓扑：先并行完成两对局部归并，再由原 owner 合并，保持分片、权重加载、M16、输出和行末屏障不变。先静态证明交换逻辑字节不增加、RF 生命周期与读写依赖合法；否则写 stop.json。默认关闭必须逐字节再生研究父版；打开后通过 seed7/123 功能、竞态和单案时序。分别对照父版 396045 周期和全局最佳 391510 周期，功耗超过20W或局部无改善即停止。"
+    },
+    {
+      "transformation_id": "p1-qkv-head-layout-v1",
+      "lane": "p1_attention",
+      "evidence_ids": [
+        "official-1790649388563184258"
+      ],
+      "proposal": "研究 P1 QKV 输出到 attention 输入的 head 布局边界，先用当前最佳 profile 量化 QKV 输出写入、attention 读回与 scratch copy 的绝对服务及关键路径成本；若边界成本很低，交付 stop.json，不制造候选。仅选择一个合法的 head 对齐生产者消费者模板，保持公共 K/V 输出、注意力数值顺序和最终 ABI 不变；不得声称直接融合完整 QKV、attention 与 WO。默认关闭时逐字节复现已审计基线，打开后通过局部功能、seed7/123 完整功能和单案时序，记录新增 RF、布局转换和通信成本。"
+    },
+    {
+      "transformation_id": "d1-head-aligned-boundary-v1",
+      "lane": "d1_decode",
+      "evidence_ids": [
+        "research-415918028abfa7f93caf"
+      ],
+      "proposal": "研究 D1 QKV 到 attention 或 attention 到 WO 的一个反复发生的 head 布局边界，优先后七步热路径；只选真实 profile 中有可测交换或 scratch 读回成本的单一边界。先核对公共 K/V 输出、STEP.COMMIT 和输入释放约束，禁止提前读取未来 token。若边界开销无法量化或 RF/布局不合法，写 stop.json；否则实现默认关闭的有界 head 对齐模板，保持其他算子不变。交付能够改变真实 ASM 的1至3个合法参数种子，经 seed7/123 功能和单案时序验证，不以冷首步的微小收益代替热路径收益。"
+    }
+  ]
+}

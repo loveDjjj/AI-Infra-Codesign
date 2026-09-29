@@ -22,6 +22,7 @@
       <section class="panel"><div class="panel-header"><div><h2>最佳分数走势</h2><p class="hint">仅使用通过官方审计的完整整案</p></div><span class="tag">官方结果</span></div><svg class="chart" id="scoreChart" viewBox="0 0 800 220" role="img" aria-label="最佳分数走势图"></svg><div class="axis"><span>较早</span><span>最新</span></div><div class="meta" id="bestId">等待数据</div></section>
       <div class="stack"><section class="panel"><div class="panel-header"><div><h2>P1 最少周期</h2><p class="hint">合格整案中的累计最少值</p></div></div><svg class="chart small" id="p1Chart" viewBox="0 0 800 160" role="img" aria-label="P1 周期走势图"></svg></section><section class="panel"><div class="panel-header"><div><h2>D1 最少周期</h2><p class="hint">合格整案中的累计最少值</p></div></div><svg class="chart small" id="d1Chart" viewBox="0 0 800 160" role="img" aria-label="D1 周期走势图"></svg></section></div>
       <section class="panel full"><div class="panel-header"><div><h2>当前任务</h2><p class="hint">逐个核对进程身份，旧状态不会冒充运行中任务</p></div><span class="tag" id="taskCount">0 个任务</span></div><div class="table-wrap"><table><thead><tr><th>批次</th><th>阶段</th><th>任务</th><th>已运行</th><th>峰值内存</th></tr></thead><tbody id="tasks"><tr><td class="empty" colspan="5">正在读取任务状态…</td></tr></tbody></table></div></section>
+      <section class="panel full"><div class="panel-header"><div><h2>候选供给</h2><p class="hint">估计可执行工作余量；不把编码和等待依赖算作已就绪候选</p></div></div><p class="ai" id="supplyStatus">正在读取供给状态…</p></section>
       <section class="panel full"><div class="panel-header"><div><h2>最新 AI 整理</h2><p class="hint">研究判断与正式评估事实分开保存</p></div></div><p class="ai" id="aiSummary">等待数据…</p><div class="meta" id="aiId"></div></section>
     </div><p class="footer" id="updated">正在连接本地数据服务…</p>
   </main>
@@ -47,6 +48,7 @@
       const tbody=$('tasks');tbody.replaceChildren();
       if(!data.tasks.length){const row=tbody.insertRow();const cell=row.insertCell();cell.colSpan=5;cell.className='empty';cell.textContent='当前没有核实仍在运行的任务'}
       for(const task of data.tasks){const row=tbody.insertRow();for(const value of [task.campaign,task.stage,task.key,fmt(task.seconds)+' 秒',fmt(task.rss_mib)+' MiB']){const cell=row.insertCell();cell.textContent=value}row.cells[1].className='stage'}
+      const supply=data.supply;$('supplyStatus').textContent=supply?`${supply.campaign} · 已就绪 ${fmt(supply.ready_tasks)} 项 · 实现族任务 ${fmt(supply.active_family_tasks)} 项 · 估计余量 ${fmt(supply.coverage_seconds)} 秒 · ${supply.blocked_reason||'供给正常'}`:'当前没有未完批次';
       $('aiSummary').textContent=data.ai?.summary||'暂无 AI 整理';$('aiId').textContent=data.ai?.id?'决策 ID：'+data.ai.id:'';
       $('updated').textContent='最近更新：'+new Date(data.updated_at).toLocaleString('zh-CN')+' · 仅显示简要指标；完整报告留在本地证据中。';
       $('connection').classList.add('ok');$('connectionText').textContent='实时连接正常';

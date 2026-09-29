@@ -157,6 +157,67 @@ class PipelineChecks(unittest.TestCase):
             self.assertEqual([item['key'] for item in instance.pending],
                              ['implementation_official-first'])
 
+    def test_coder_slot_is_reused_while_another_family_validates(self):
+        import codesign_lab.search.pipeline as controller_module
+        instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+        instance.args = type('Args', (), {'implementation_enabled': True,
+            'implementation_max_proposals': 2, 'implementation_coders': 1,
+            'implementation_validators': 1, 'implementation_official': 1,
+            'full_slots': 2, 'implementation_model': 'gpt-6-astra',
+            'implementation_effort': 'medium', 'implementation_min_case_gain': .002,
+            'implementation_min_score_gain': 100})()
+        instance.out = Path('/tmp/structure-capacity')
+        instance.python = '/usr/bin/python3'
+        instance.pool = type('Pool', (), {'state': {'analysis': {'lanes': {
+            'global': {'session_id': 'planner'}}}}})()
+        instance.pending, instance.active, instance.seen = [], {}, set()
+        instance.enqueue = lambda job: (instance.pending.append(job), instance.seen.add(job['key']))
+        proposals = [(name, {'id': name}) for name in ('first', 'second', 'third')]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('codesign_lab.search.implementation.proposals', return_value=proposals), \
+             patch.object(controller_module, 'ROOT', Path(directory)):
+            state = Path(directory) / 'workspace/implementation-loop/structure-capacity/first/state.json'
+            state.parent.mkdir(parents=True)
+            state.write_text(json.dumps({'status': 'CODED'}))
+            instance.process_implementations()
+            self.assertEqual([(job['proposal_id'], job['stage']) for job in instance.pending],
+                             [('first', 'implementation_validate'), ('second', 'implementation_code')])
+
+    def test_research_case_enters_pair_pool_without_isolated_full_grade(self):
+        import codesign_lab.search.pipeline as controller_module
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / 'workspace/implementation-loop/campaign/first/source/workspace/candidate'
+            for name in ('hardware.json', 'programs/M1_P1.asm', 'programs/M2_D1.asm'):
+                artifact = candidate / name
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(name)
+            state_path = root / 'workspace/implementation-loop/campaign/first/state.json'
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({'status': 'RESEARCH_PAUSED',
+                'research_record': 'research-first', 'proposal': {'case': 'M1_P1'}}))
+            record = {'id': 'research-first', 'candidate': str(candidate),
+                'source_root': str(candidate.parents[1]),
+                'artifact_sha256': {name: controller_module.digest(candidate/name)
+                    for name in ('hardware.json', 'programs/M1_P1.asm', 'programs/M2_D1.asm')},
+                'cases': {'M1_P1': {'functional_passed': True, 'timing': {
+                    'cycles': 390000, 'peak_window_power_w': 19}}}}
+            instance = pipeline.Pipeline.__new__(pipeline.Pipeline)
+            instance.out = root / 'workspace/pipeline/campaign'
+            instance.done = []
+            instance.pool = Mock(state={'analysis': {'lanes': {}}})
+            instance.triggers = Mock()
+            instance.observe = Mock()
+            instance.shortlist = Mock()
+            job = {'key': 'implementation_validate-first',
+                   'stage': 'implementation_validate', 'proposal_id': 'first'}
+            with patch.object(controller_module, 'ROOT', root), \
+                 patch.object(controller_module, 'read', return_value=[record]):
+                instance.completed(job, {'status': 'completed', 'wall_seconds': 1})
+            instance.observe.assert_called_once()
+            instance.shortlist.assert_called_once()
+            self.assertEqual(instance.done[0]['status'], 'completed')
+
     def test_interrupted_structure_is_recorded_and_sent_to_global_analysis(self):
         import codesign_lab.search.pipeline as controller_module
         with tempfile.TemporaryDirectory() as directory:

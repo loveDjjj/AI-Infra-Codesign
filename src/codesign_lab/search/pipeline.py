@@ -100,6 +100,7 @@ class Pipeline:
             self.family_sources[str(source_root)] = source_identity_at(source_root)
         self.identity = key({'source': self.source, 'official': self.manifest,
             'configs': {str(p): digest(p) for p in args.config}, 'watch': args.watch,
+            'hypotheses': digest(args.hypotheses) if getattr(args, 'hypotheses', None) else None,
             'family_configs': [(str(Path(source).resolve()), str(Path(config).resolve()),
                                 self.family_sources[str(Path(source).resolve())], digest(config))
                                for source, config in getattr(args, 'family_config', [])],
@@ -131,6 +132,15 @@ class Pipeline:
         atomic_json(meta, {'identity': self.identity, 'source': self.source})
         from .targets import TargetPool, epoch
         self.pool = TargetPool(self.out, epoch(), max_proposals=getattr(args, 'max_proposals', 128))
+        if getattr(args, 'hypotheses', None):
+            from .hypotheses import load_pool
+            hypotheses, hypothesis_hash = load_pool(args.hypotheses)
+            previous = self.pool.state.get('hypothesis_hash')
+            if previous is not None and previous != hypothesis_hash:
+                raise ValueError('恢复时结构假设池身份发生变化')
+            self.pool.state['hypotheses'] = hypotheses
+            self.pool.state['hypothesis_hash'] = hypothesis_hash
+            self.pool.save()
         for entry in self.pool.state['targets'].values():
             definition = entry['definition']
             if definition.get('execution_root'):
@@ -456,9 +466,14 @@ class Pipeline:
                     'source_root': str(source_root),
                     'command': self.build_command(source_root, cfg, base_path)})
                 entry['proposal_exhausted'] = False
-                for _proposed_key, config in generate(base, definition['variables'], self.pool.max_proposals,
+                if definition.get('family_manifest'):
+                    from .families import configurations
+                    proposed = configurations(base, definition['variants'])
+                else:
+                    proposed = generate(base, definition['variables'], self.pool.max_proposals,
                         sampler=definition.get('sampler', 'enumerate'),
-                        seed=target_seed(definition) if definition.get('sampler') == 'random' else 0):
+                        seed=target_seed(definition) if definition.get('sampler') == 'random' else 0)
+                for _proposed_key, config in proposed:
                     config_key = (_proposed_key if source_root == ROOT else
                                   self.design_key(config, source_root))
                     prior = entry['candidates'].get(config_key)
@@ -537,10 +552,19 @@ class Pipeline:
         open_jobs = [job for job in self.pending if job['stage'] != 'report']
         open_jobs += [item['job'] for item in getattr(self, 'active', {}).values()
                       if item['job']['stage'] != 'report']
+        supply_request = None
+        if getattr(getattr(self, 'args', None), 'ai_enabled', False) and \
+                getattr(getattr(self, 'args', None), 'analysis_mode', 'per_lane') == 'global':
+            from .supply import review
+            supply_request = review(self.pool.state, pending=self.pending, active=self.active,
+                completed=self.done, budget=self.budget, workers=self.workers,
+                source_epoch=self.pool.source_epoch)
         requests = self.triggers.poll(self.pool.state['targets'], len(open_jobs),
             review_exhaustion=getattr(getattr(self, 'args', None), 'ai_enabled', False)
-                and not open_jobs and not self.external())
+                and not open_jobs and not self.external(), supply=supply_request)
         for request in requests:
+            if supply_request is not None and request['lane'] == 'global':
+                self.pool.state['supply']['last_request_id'] = request['decision_id']
             lane = self.triggers.lane(request['lane'])
             wanted = set(request['observation_ids'])
             snapshot = {'source_epoch': self.pool.source_epoch, 'campaign': self.out.name,
@@ -556,6 +580,8 @@ class Pipeline:
                     'active_jobs': len(self.active), 'pending_jobs': len(self.pending),
                     'memory_budget_bytes': self.memory_budget}}
             if request['lane'] == 'global':
+                snapshot['supply'] = self.pool.state.get('supply', {})
+            if request['lane'] == 'global':
                 snapshot['cross_lane'] = self.global_snapshot()
                 exhausted = 'pool_exhausted' in request['reasons']
                 snapshot['analysis_task'] = (
@@ -567,6 +593,9 @@ class Pipeline:
                     '优先提出2至4个有证据、互不重复的合法目标，并明确变量、起点、优先级和有限试验预算；'
                     '只能从 available_base_records 选择参数目标的 base_record；最高分跨源码组合只用于整案比较，'
                     '不能当作单生成器搜索起点。没有可用新参数时请提出结构假设。'
+                    '每条 implementation_proposals 都必须填写 parent_record；独立结构写空字符串，'
+                    '继承研究实现则写已准入且可取回的研究记录 ID；'
+                    '只在 proposal 文字里写父版不会改变实际生成器。明显退化而未准入的记录不能作为自动父版。'
                     '硬件改变必须覆盖P1和D1。若只有小收益且可表达的参数空间已经覆盖，转而提出具体实现变更假设。'
                     '当本轮最好单案仍慢于 best_audited_cases 且已覆盖原参数邻域时，优先给出至少一个'
                     '可用小规模功能与单案测评否证的 implementation_proposals；若不能提出，必须写明缺失的证据。'
@@ -625,6 +654,9 @@ class Pipeline:
                                 for case,info in record.get('cases',{}).items()}}
                       for record in rows if record.get('source_root','').startswith((
                           'workspace/families/', 'workspace/implementation-loop/'))
+                      and (record.get('source_root','').startswith('workspace/families/') or
+                           record.get('research_admission') is True or
+                           record.get('audited') is True and record.get('eligible') is True)
                       and record.get('source_sha256') and isinstance(record.get('config'),dict)
                       and any(info.get('timing',{}).get('cycles') for info in record.get('cases',{}).values())]
         promoted=load(ROOT/'data/state.json').get('promoted_record')
@@ -639,6 +671,7 @@ class Pipeline:
                     for key,entry in self.pool.state['targets'].items()],
                 'case_facts':facts[-80:],
                 'available_family_bases':family_bases[-8:],
+                'structure_parent_rule':'若结构提案必须继承某个研究实现，必须填写 parent_record 为该已准入研究记录 ID；不得仅在文字中描述继承关系。未经准入或源码已丢失的研究记录不可作为父版。',
                 'available_base_records':available[-12:],
                 'best_audited':[{'record_id':record['id'],'score':record['score'],
                     'cases':{case:{'cycles':info.get('timing',{}).get('cycles'),
@@ -925,11 +958,24 @@ class Pipeline:
         lane = self.pool.state.get('analysis', {}).get('lanes', {}).get('global', {})
         if not lane.get('session_id'):
             return
-        active = sum(job['stage'].startswith('implementation_') for job in self.pending)
-        active += sum(item['job']['stage'].startswith('implementation_') for item in self.active.values())
+        stages = [job['stage'] for job in self.pending] + [item['job']['stage'] for item in self.active.values()]
+        active = {phase: stages.count('implementation_' + phase) for phase in ('code', 'validate', 'official')}
+        # 实现族总数与各阶段槽位分开计；已在验证/验收的族不占 coder 槽，
+        # 但仍占活跃研究族预算，避免规划者无限追加昂贵源码分支。
+        family_limit = self.args.implementation_max_proposals
+        known_families = {job['proposal_id'] for job in self.pending
+                          if job['stage'].startswith('implementation_')}
+        known_families.update(job['proposal_id'] for job in
+                              (item['job'] for item in self.active.values())
+                              if job['stage'].startswith('implementation_'))
+        for path in directory.glob('*/state.json') if directory.is_dir() else []:
+            if load(path).get('status') not in TERMINAL:
+                known_families.add(path.parent.name)
+        limits = {'code': getattr(self.args, 'implementation_coders', 2),
+                  'validate': getattr(self.args, 'implementation_validators', self.args.implementation_max_proposals),
+                  'official': min(getattr(self.args, 'full_slots', 1),
+                                  getattr(self.args, 'implementation_official', 1))}
         for identifier, item in proposals(self.out):
-            if active >= self.args.implementation_max_proposals:
-                break
             state = directory / identifier / 'state.json'
             state_data = load(state) if state.exists() else {}
             status = state_data.get('status', 'QUEUED')
@@ -938,6 +984,10 @@ class Pipeline:
                 continue
             phase = ('code' if status == 'QUEUED' else
                      'official' if status == 'OFFICIAL_QUEUED' else 'validate')
+            if identifier not in known_families and len(known_families) >= family_limit:
+                continue
+            if active[phase] >= limits[phase]:
+                continue
             stage = 'implementation_' + phase
             retry = int(state_data.get('recovery_attempts', 0))
             job_key = stage + '-' + identifier + ('-recovery' + str(retry) if retry else '')
@@ -953,7 +1003,8 @@ class Pipeline:
                     '--reasoning-effort', self.args.implementation_effort,
                     '--min-case-gain', str(self.args.implementation_min_case_gain),
                     '--min-score-gain', str(self.args.implementation_min_score_gain)]})
-            active += 1
+            active[phase] += 1
+            known_families.add(identifier)
 
     def completed(self, job, result):
         self.done.append(result)
@@ -984,6 +1035,30 @@ class Pipeline:
                           ('；' + str(result['error']) if result.get('error') else ''))
                 atomic_json(state_path, state)
             status = state.get('status', 'MISSING')
+            # 隔离结构的单案证据先进入共享组合池；不必先搭旧另一案做整案，
+            # 也不必伪造一个重复参数目标才能触发组合。
+            record_id = state.get('research_record')
+            if status in {'RESEARCH_PAUSED', 'TARGET_INJECTED', 'TARGET_QUEUED',
+                          'WAITING_FOR_LAUNCH', 'AUDITED_NO_PROMOTION'} and record_id:
+                record = next((row for row in read() if row['id'] == record_id), None)
+                case = state.get('proposal', {}).get('case')
+                info = record.get('cases', {}).get(case, {}) if record else {}
+                timing = info.get('timing', {})
+                candidate_name = record.get('candidate') if record else None
+                if info.get('functional_passed') is True and isinstance(timing.get('cycles'), int) and \
+                        isinstance(timing.get('peak_window_power_w'), (int, float)) and \
+                        timing['peak_window_power_w'] <= 20 and isinstance(candidate_name, str):
+                    candidate_path = Path(candidate_name)
+                    candidate_path = candidate_path if candidate_path.is_absolute() else ROOT / candidate_path
+                    source_name = record.get('source_root')
+                    source_root = Path(source_name) if source_name else ROOT
+                    source_root = source_root if source_root.is_absolute() else ROOT / source_root
+                    if candidate_path.is_dir() and record.get('artifact_sha256') and \
+                            all(digest(candidate_path / name) == expected
+                                for name, expected in record['artifact_sha256'].items()):
+                        self.observe(candidate_path, case, timing['cycles'],
+                            timing['peak_window_power_w'], source_root=source_root)
+                        self.shortlist()
             if ((job['stage'] == 'implementation_code' and status == 'CODED') or
                     (job['stage'] == 'implementation_validate' and status == 'OFFICIAL_QUEUED')) and \
                     result['status'] == 'completed':
@@ -1027,6 +1102,8 @@ class Pipeline:
                     'case_gain': state.get('case_gain'), 'official_score': state.get('official_score'),
                     'timing': timing, 'research_record': state.get('research_record'),
                     'target_id': state.get('target_id'),
+                    'reason': state.get('reason'), 'static_evidence': state.get('static_evidence'),
+                    'rejection_kind': state.get('rejection_kind'),
                     'error': state.get('error') or state.get('last_error')})
                 self.pool.save()
             print(json.dumps({'event': 'implementation_finished', 'proposal_id': job['proposal_id'],
@@ -1272,8 +1349,11 @@ class Pipeline:
                     not external and not target_work_pending):
                     revision=self.triggers.pool_revision(self.pool.state['targets'])
                     global_lane=self.triggers.lane('global')
+                    supply=self.pool.state.get('supply', {})
+                    supply_review_done=(not supply or supply.get('attempts', 0) >= 2 or
+                        supply.get('blocked_reason') in {'AI 或运行时间预算已用尽', '单案评估预算已用尽'})
                     if (revision is not None and global_lane.get('reviewed_pool_revision') == revision
-                            and not global_lane.get('pending')):
+                            and not global_lane.get('pending') and supply_review_done):
                         if self.has_unmaterialized_profile_requests():
                             self.process_profile_requests()
                             self.pool.save()
@@ -1300,6 +1380,8 @@ class Pipeline:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, action='append', default=[])
+    parser.add_argument('--hypotheses', type=Path,
+                        help='人工审阅的独立结构机制池，位于 configs')
     parser.add_argument('--family-config', nargs=2, action='append', default=[],
                         metavar=('FAMILY_ROOT','SEARCH_CONFIG'),
                         help='在同一调度器中运行冻结实现族的搜索配置')
@@ -1328,6 +1410,9 @@ def main(argv=None):
     parser.add_argument('--implementation-model', default='gpt-6-astra')
     parser.add_argument('--implementation-effort', default='medium')
     parser.add_argument('--implementation-max-proposals', type=int, default=2)
+    parser.add_argument('--implementation-coders', type=int, default=2)
+    parser.add_argument('--implementation-validators', type=int, default=2)
+    parser.add_argument('--implementation-official', type=int, default=1)
     parser.add_argument('--implementation-min-case-gain', type=float, default=.002)
     parser.add_argument('--implementation-min-score-gain', type=float, default=100)
     parser.add_argument('--no-auto-audit', action='store_true', help='关闭合格完整验收后的自动审计与证据保全')
@@ -1351,7 +1436,7 @@ def main(argv=None):
         args.cache_dir=(ROOT/args.cache_dir).resolve()
         if not args.cache_dir.is_relative_to(ROOT/'workspace'):
             parser.error('探索缓存必须位于 workspace')
-    if not 0 < args.memory_fraction <= .9 or min(args.max_proposals, args.max_case_calls, args.max_full_calls, args.max_ai_calls, args.max_pending_full, args.max_profile_calls, args.implementation_max_proposals) <= 0:
+    if not 0 < args.memory_fraction <= .9 or min(args.max_proposals, args.max_case_calls, args.max_full_calls, args.max_ai_calls, args.max_pending_full, args.max_profile_calls, args.implementation_max_proposals, args.implementation_coders, args.implementation_validators, args.implementation_official) <= 0:
         parser.error('内存比例或累计预算无效')
     if not 0 <= args.implementation_min_case_gain < 1 or args.implementation_min_score_gain < 0:
         parser.error('结构实验门槛无效')

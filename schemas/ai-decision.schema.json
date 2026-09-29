@@ -201,6 +201,9 @@
           "proposal": {
             "type": "string"
           },
+          "parent_record": {
+            "type": "string"
+          },
           "evidence_ids": {
             "type": "array",
             "items": {
@@ -212,6 +215,7 @@
           "lane",
           "transformation_id",
           "proposal",
+          "parent_record",
           "evidence_ids"
         ],
         "additionalProperties": false

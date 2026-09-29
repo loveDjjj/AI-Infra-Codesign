@@ -21,7 +21,7 @@ FIELDS = {
 
 def arguments(path, *, execute=False, resume=False):
     settings = load(path)
-    allowed = {'schema_version', 'out', 'search_configs', 'watch', 'stay_open', 'implementation',
+    allowed = {'schema_version', 'out', 'search_configs', 'hypotheses', 'watch', 'stay_open', 'implementation',
                'stop_on_exhaustion', 'auto_audit', 'cache_dir', *FIELDS}
     if set(settings) - allowed or settings.get('schema_version') != 1:
         raise ValueError('未知流水线字段或 schema_version')
@@ -31,6 +31,12 @@ def arguments(path, *, execute=False, resume=False):
     if not out.resolve().is_relative_to(ROOT/'workspace/pipeline'):
         raise ValueError('配置 out 必须位于 workspace/pipeline')
     argv = ['--out', str(out)]
+    if 'hypotheses' in settings:
+        if not isinstance(settings['hypotheses'],str):raise ValueError('hypotheses 必须为配置路径')
+        path=(ROOT/settings['hypotheses']).resolve()
+        if not path.is_relative_to(ROOT/'configs') or not path.is_file():
+            raise ValueError('结构假设配置必须位于 configs')
+        argv.extend(['--hypotheses',str(path)])
     if 'cache_dir' in settings:
         if not isinstance(settings['cache_dir'],str):raise ValueError('cache_dir 必须是路径字符串')
         cache=(ROOT/settings['cache_dir']).resolve()
@@ -68,7 +74,8 @@ def arguments(path, *, execute=False, resume=False):
             argv.append('--stop-on-exhaustion')
     implementation = settings.get('implementation', {})
     if not isinstance(implementation, dict) or set(implementation)-{
-            'enabled','model','reasoning_effort','max_proposals','min_case_gain','min_score_gain'}:
+            'enabled','model','reasoning_effort','max_proposals','coders','validators',
+            'official','min_case_gain','min_score_gain'}:
         raise ValueError('未知结构实验配置字段')
     if 'enabled' in implementation and type(implementation['enabled']) is not bool:
         raise ValueError('implementation.enabled 必须为布尔值')
@@ -77,13 +84,16 @@ def arguments(path, *, execute=False, resume=False):
             raise ValueError('implementation.model 无效')
         if 'reasoning_effort' in implementation and implementation['reasoning_effort'] not in {'low','medium','high','xhigh','max'}:
             raise ValueError('implementation.reasoning_effort 无效')
-        for name in ('max_proposals','min_case_gain','min_score_gain'):
+        for name in ('max_proposals','coders','validators','official','min_case_gain','min_score_gain'):
             if name in implementation and type(implementation[name]) not in (int,float):
                 raise ValueError('implementation.'+name+' 必须为数值')
         argv.append('--implementation-enabled')
         for name, flag in [('model','implementation-model'),
                            ('reasoning_effort','implementation-effort'),
                            ('max_proposals','implementation-max-proposals'),
+                           ('coders','implementation-coders'),
+                           ('validators','implementation-validators'),
+                           ('official','implementation-official'),
                            ('min_case_gain','implementation-min-case-gain'),
                            ('min_score_gain','implementation-min-score-gain')]:
             if name in implementation:

@@ -36,6 +36,19 @@ def proposals(campaign: Path):
     source = state['source_epoch']
     ledger = ROOT / 'data/decisions.jsonl'
     seen = set()
+    for proposal in state.get('hypotheses', []):
+        lane = proposal['lane']
+        case = CASES['p1' if lane.startswith('p1') else 'd1']
+        transformation = proposal['transformation_id']
+        seen.add((source, case, transformation))
+        identifier = hashlib.sha256((source + ':seed:' + transformation).encode()).hexdigest()[:20]
+        yield identifier, {'id': identifier, 'decision_id': 'seed-' + identifier,
+                           'source_epoch': source, 'lane': lane, 'case': case,
+                           'transformation_id': transformation,
+                           'proposal': proposal['proposal'],
+                           'parent_record': proposal.get('parent_record'),
+                           'evidence_ids': proposal['evidence_ids'],
+                           'evidence_snapshot': {}}
     for line in ledger.read_text().splitlines() if ledger.exists() else []:
         decision = json.loads(line)
         if decision.get('source_epoch') != source:
@@ -57,6 +70,7 @@ def proposals(campaign: Path):
                                'source_epoch': source, 'lane': lane,
                                'case': case, 'transformation_id': transformation,
                                'proposal': proposal['proposal'],
+                               'parent_record': proposal.get('parent_record'),
                                'evidence_ids': proposal['evidence_ids'],
                                'evidence_snapshot': decision.get('evidence_snapshot', {})}
 
@@ -106,6 +120,36 @@ def best_record(case=None):
     if not compatible:
         raise ValueError('当前最高分硬件缺少可再生的合格单案基线')
     return min(compatible, key=lambda row: (row['cases'][case]['timing']['cycles'], -row['score']))
+
+
+def research_parent(record: dict, case: str):
+    """研究父版必须可取回、已准入，且源码、产物、真实报告一致。"""
+    if record.get('id', '').startswith('research-') is False or record.get('research_admission') is not True:
+        raise ValueError('研究父版未经准入')
+    source = (ROOT / record.get('source_root', '')).resolve()
+    allowed = (ROOT / 'workspace/implementation-loop').resolve()
+    if not source.is_relative_to(allowed) or source.name != 'source' or not (source / 'src').is_dir():
+        raise ValueError('研究父版源码路径无效')
+    if snapshot_epoch(source) != record.get('source_sha256'):
+        raise ValueError('研究父版源码身份不一致')
+    candidate = (ROOT / record.get('candidate', '')).resolve()
+    report = (ROOT / record.get('report', '')).resolve()
+    if not candidate.is_relative_to(source) or not report.is_relative_to(source) or \
+            not report.is_file() or artifacts(candidate) != record.get('artifact_sha256'):
+        raise ValueError('研究父版产物或报告缺失')
+    data = load(report)
+    info = data.get('cases', {}).get(case, {})
+    timing = info.get('timing', {})
+    if info.get('functional_passed') is not True or type(timing.get('cycles')) is not int or \
+            timing.get('peak_window_power_w', float('inf')) > 20 or \
+            data.get('hardware') != load(candidate / 'hardware.json') or \
+            data.get('program_sha256', {}).get(case) != digest(candidate / 'programs' / (case + '.asm')):
+        raise ValueError('研究父版单案报告与产物不匹配')
+    return source, candidate, report
+
+
+def parent_anchor(baseline: dict):
+    return baseline['id'] if baseline.get('id', '').startswith('research-') else Path(baseline['candidate']).name
 
 
 def origin_root():
@@ -226,7 +270,10 @@ from pathlib import Path
 loader=unittest.TestLoader()
 suite=loader.discover("tests",pattern="test_*.py")
 historical=("test_contracts.",
- "test_d1_w2_groups.D1W2GroupChecks.test_supported_groups_change_only_d1_sync")
+ "test_d1_w2_groups.D1W2GroupChecks.test_supported_groups_change_only_d1_sync",
+ "test_decisions.DecisionChecks.test_structural_identity_is_validated_before_decision_commit",
+ "test_decisions.DecisionChecks.test_invalid_structural_identity_does_not_commit",
+ "test_family_broker.FamilyBrokerChecks.test_global_analysis_receives_eligible_family_base_ids")
 def missing_fixed_release(test):
     module=sys.modules.get(test.__class__.__module__)
     base=getattr(module,"BASE",None)
@@ -286,15 +333,28 @@ def snapshot_project(destination: Path, baseline: dict):
     (destination / 'data/releases').mkdir(parents=True)
     for name in ('experiments.jsonl', 'state.json'):
         shutil.copy2(ROOT / 'data' / name, destination / 'data' / name)
-    release = Path(baseline['candidate'])
-    release = release if release.is_absolute() else ROOT / release
-    if not release.is_relative_to(ROOT / 'data/releases') or not release.is_dir():
-        raise ValueError('基线必须有受保护的 release 目录')
+    research = baseline.get('id', '').startswith('research-')
+    if research:
+        parent_source, parent_candidate, parent_report = research_parent(
+            baseline, next(iter(baseline['cases'])))
+        release = ROOT / 'data/releases' / baseline['id']
+    else:
+        release = Path(baseline['candidate'])
+        release = release if release.is_absolute() else ROOT / release
+        if not release.is_relative_to(ROOT / 'data/releases') or not release.is_dir():
+            raise ValueError('基线必须有受保护的 release 目录')
     # 结构验证只需当前基线与固定 joint28 测试锚点；其余历史 release 留在主工程。
     required_releases = {release, ROOT / 'data/releases/joint28'}
     for source in sorted(required_releases):
         if source.is_dir():
             shutil.copytree(source, destination / 'data/releases' / source.name)
+    if research:
+        anchor = destination / 'data/releases' / baseline['id']
+        for name in ARTIFACTS:
+            target = anchor / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(parent_candidate / name, target)
+        shutil.copy2(parent_report, anchor / 'local-grade.json')
     for name in ('iteration-log.md', 'official-starter.zip'):
         if (ROOT / 'data' / name).exists():
             shutil.copy2(ROOT / 'data' / name, destination / 'data' / name)
@@ -313,7 +373,15 @@ def snapshot_project(destination: Path, baseline: dict):
     copied = {name: digest(destination / name) for name in generator_hashes}
     if generator_hashes != copied:
         raise ValueError('隔离生成器复制后哈希不一致')
-    if baseline.get('reproduction') == 'epoch_verified':
+    if research:
+        source_codegen = parent_source / 'src/codesign_lab/codegen'
+        target_codegen = destination / 'src/codesign_lab/codegen'
+        shutil.rmtree(target_codegen)
+        shutil.copytree(source_codegen, target_codegen,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        baseline_hashes = {str(path.relative_to(destination)): digest(path)
+                           for path in target_codegen.rglob('*.py')}
+    elif baseline.get('reproduction') == 'epoch_verified':
         # 跨源码版本的最高分必须从受保护归档恢复生成器，否则基线重建会
         # 悄悄使用主源码，把正确的成绩错误归因于另一套实现。
         baseline_hashes = restore_release_generator(
@@ -321,8 +389,10 @@ def snapshot_project(destination: Path, baseline: dict):
     else:
         baseline_hashes = generator_hashes
     atomic_json(destination / 'workspace/source-lineage.json',
-                {'generator_source': str(release) if baseline.get('reproduction') == 'epoch_verified'
+                {'generator_source': str(parent_source) if research else
+                                     str(release) if baseline.get('reproduction') == 'epoch_verified'
                                      else str(ROOT),
+                 'parent_record': baseline.get('id'),
                  'generator_hashes': baseline_hashes,
                  'campaign_generator_source': str(ROOT),
                  'campaign_generator_hashes': generator_hashes,
@@ -521,13 +591,28 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
             'src/codesign_lab/codegen 下 Python 文件，必要时新增 tests/test_implementation_*.py。'
             '不得修改 vendor/official、主仓库、已有评分报告或上传网站；不得运行完整模拟器。'
             '只能参考本项目自己的源码、账本和报告，不得参考或复用其他参与者的作品或代理输出。'
-            '如提案包含多个结构变换，本次只实现第一个可独立检验的变换，不把多个因素捆在一起。'
+            '同一机制必要的分片、RF布局和归并调整可以协同实现；不要混入无关优化。'
             '必须保留原算法作为默认行为，通过有默认值的配置开关启用新实现。'
             '请将完整候选设计 JSON 写到 workspace/implementation-input/config.json；'
-            '该文件从基线配置复制，只打开你新增的开关。完成后说明改动。\n'
-            '受影响案例：' + item['case'] + '\n结构提案：' + item['proposal'] + '\n'
+            '必须逐字复制 workspace/implementation-baseline.json 再只新增本机制开关，'
+            '不要从 configs/best.yaml 或其他历史配置复制。编码阶段不得运行 lab run、'
+            '评估器、模拟器，亦不得修改 data/experiments.jsonl 或任何冻结报告；'
+            '这些由统一 worker 在代码交付后执行。若静态资源账已否证机制，'
+            '不修改生成器也不伪造 config.json，而在 '
+            'workspace/implementation-input/stop.json 写入严格 JSON：'
+            '{"schema_version":1,"mechanism_id":"当前机制ID",'
+            '"reason":"具体否证条件","evidence":["可核对的计算或源码事实"]}。'
+            '若新机制确有可调参数，'
+            '再写 workspace/implementation-input/capabilities.json：'
+            'schema_version=1、family_id、mechanism_id、case、operator、'
+            'base_record_id="pending"、registered_source_sha256="pending"、'
+            'variables(完整配置路径到有限合法值列表)、seed_variants(1至6个完整参数元组)、'
+            'critical_checks(列表)、stop_if(明确停止条件)。种子必须相对候选配置不同且由代码真实支持；'
+            '没有有效族内变量时不必伪造清单，控制器将只保存单案结果。完成后说明改动。\n'
+            '受影响案例：' + item['case'] + '\n机制 ID：' +
+            str(item.get('transformation_id')) + '\n结构提案：' + item['proposal'] + '\n'
             '本项目证据摘要：' + json.dumps(evidence, ensure_ascii=False) + '\n'
-            '基线记录：' + baseline['id'] + '\n基线配置：' +
+            '父版记录：' + baseline['id'] + '；本隔离副本已从该父版冻结源码恢复并逐字节核验其程序。\n基线配置：' +
             json.dumps(baseline['config'], ensure_ascii=False) + '\n'
             '请先阅读本副本 AGENTS.md 和相关生成器源码。')
         executable = os.environ.get('CODEX_IMPLEMENTATION_CLI', 'codex')
@@ -594,10 +679,38 @@ def retry_infrastructure_failure(state_path: Path):
     return state
 
 
+def family_target(snapshot: Path, item: dict, record_id: str, source_epoch: str):
+    """从已验证能力清单展开本机制的有限种子；缺清单绝不回退旧网格。"""
+    from .families import validate_manifest
+    path = snapshot / 'workspace/implementation-input/capabilities.json'
+    if not path.is_file():
+        return None
+    record = next((row for row in read() if row['id'] == record_id), None)
+    if not record or not isinstance(record.get('config'), dict):
+        raise ValueError('实现族基线记录缺失')
+    manifest = load(path)
+    manifest['base_record_id'] = record_id
+    manifest['registered_source_sha256'] = snapshot_epoch(snapshot)
+    manifest = validate_manifest(manifest, base_config=record['config'],
+        source_sha256=manifest['registered_source_sha256'], case=item['case'],
+        base_record_id=record_id)
+    atomic_json(path, manifest)
+    values = manifest['seed_variants']
+    return {'schema_version': 1, 'target_id': 'family-' + item['id'],
+        'lane': item['lane'], 'hypothesis': item.get('proposal', '验证实现族合法种子')[:4000],
+        'base_record': record_id, 'source_epoch': source_epoch,
+        'cases': [item['case']], 'variables': manifest['variables'],
+        'sampler': 'enumerate', 'max_trials': len(values), 'max_inflight': len(values),
+        'priority': .8, 'evidence_ids': [record_id],
+        'family_manifest': 'workspace/implementation-input/capabilities.json',
+        'variants': values}
+
+
 def seed_next_campaign(snapshot: Path, item: dict, record_id: str, session_id: str):
     settings = load(snapshot / 'configs/pipeline.yaml')
     settings['out'] = 'workspace/pipeline/epoch-' + item['id']
     settings['watch'] = []
+    settings.pop('hypotheses', None)
     settings['stay_open'] = False
     settings['stop_on_exhaustion'] = True
     settings['ai'] = {'enabled': True, 'mode': 'global', 'timeout_seconds': 900}
@@ -608,21 +721,9 @@ def seed_next_campaign(snapshot: Path, item: dict, record_id: str, session_id: s
                               ai_calls=4, wall_seconds=3600)
     settings_path = snapshot / 'configs/next-epoch.json'
     atomic_json(settings_path, settings)
-    from .targets import DOMAINS
     source = snapshot_epoch(snapshot)
-    variable = ('programs.M1_P1.config.w2_preload_k' if item['case'] == 'M1_P1'
-                else 'programs.M2_D1.config.w2_load_group_size')
-    lane = 'p1_w2' if item['case'] == 'M1_P1' else 'd1_decode'
-    target = {'schema_version': 1, 'target_id': 'epoch-' + item['id'][:8] + '-' + lane,
-              'lane': lane, 'source_epoch': source, 'base_record': record_id,
-              'evidence_ids': [record_id], 'cases': [item['case']],
-              'hypothesis': '新结构首个正确单案后的有界邻域；只检查受影响案例与新数据流的交互。',
-              'variables': {variable: DOMAINS[variable]}, 'sampler': 'enumerate',
-              'priority': .8, 'max_trials': len(DOMAINS[variable]),
-              'max_inflight': len(DOMAINS[variable])}
-    targets = [target]
-    if not targets:
-        raise ValueError('新源码批次没有可验证的初始目标')
+    target = family_target(snapshot, item, record_id, source)
+    targets = [target] if target else []
     payload = snapshot / 'workspace/next-epoch-targets.json'
     atomic_json(payload, {'targets': targets, 'session_id': session_id, 'out': settings['out'],
                           'max_proposals': settings['budget']['max_proposals']})
@@ -640,18 +741,14 @@ def seed_next_campaign(snapshot: Path, item: dict, record_id: str, session_id: s
 
 
 def inject_research_target(campaign: Path, item: dict, record_id: str):
-    """把已测过的结构来源交给当前主控，继续研究受影响案例的小邻域。"""
-    from .targets import DOMAINS
+    """仅注入当前机制声明的合法种子；没有清单不消耗无关搜索预算。"""
     campaign_state = load(campaign / 'state.json')
-    variable = ('programs.M1_P1.config.w2_preload_k' if item['case'] == 'M1_P1'
-                else 'programs.M2_D1.config.w2_load_group_size')
+    snapshot = origin_root() / 'workspace/implementation-loop' / campaign.name / item['id'] / 'source'
+    target = family_target(snapshot, item, record_id, campaign_state['source_epoch'])
+    if target is None:
+        return None
     request_id = 'structure-' + item['id']
-    target = {'schema_version': 1, 'target_id': request_id,
-        'lane': item['lane'], 'hypothesis': '结构候选功能与单案时序已通过；检查新结构与既有参数的有限交互。',
-        'base_record': record_id, 'source_epoch': campaign_state['source_epoch'],
-        'cases': [item['case']], 'variables': {variable: DOMAINS[variable]},
-        'sampler': 'enumerate', 'max_trials': len(DOMAINS[variable]),
-        'priority': .8, 'evidence_ids': [record_id]}
+    target['target_id'] = request_id
     payload = {'request_id': request_id, 'command': {'op': 'add', 'target': target}}
     path = campaign / 'inbox' / (request_id + '.json')
     if path.exists():
@@ -673,7 +770,7 @@ def same_campaign_room(campaign: Path):
                     for entry in state.get('targets', {}).values())
     target_limit = state.get('target_limit', 0)
     return budget.get('deadline', 0) - time.time() >= 600 and \
-        limits.get('case', 0) - used_cases >= 3 and target_limit - allocated >= 3
+        limits.get('case', 0) - used_cases >= 1 and target_limit - allocated >= 1
 
 
 def snapshot_epoch(snapshot: Path):
@@ -858,6 +955,10 @@ class ImplementationLoop:
         if os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1' and \
                 origin_root() == ROOT and same_campaign_room(self.campaign):
             request_id = inject_research_target(self.campaign, item, record['id'])
+            if request_id is None:
+                save('RESEARCH_PAUSED', reason='没有经校验的族内变量；单案交给组合器',
+                     official_score=score, audit_record=record['id'], research_record=record['id'])
+                return state
             save('TARGET_QUEUED', target_request_id=request_id, official_score=score,
                  audit_record=record['id'])
             return state
@@ -876,7 +977,13 @@ class ImplementationLoop:
             if os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1' and \
                     origin_root() == ROOT and same_campaign_room(self.campaign):
                 request_id = inject_research_target(self.campaign, item, state['research_record'])
+                if request_id is None:
+                    save('RESEARCH_PAUSED', reason='没有经校验的族内变量；单案交给组合器')
+                    return state
                 save('TARGET_QUEUED', target_request_id=request_id)
+                return state
+            if not (snapshot / 'workspace/implementation-input/capabilities.json').is_file():
+                save('RESEARCH_PAUSED', reason='没有族内可搜索能力；不启动空源码批次')
                 return state
             settings = seed_next_campaign(snapshot, item, state['research_record'], state['session_id'])
             save('WAITING_FOR_LAUNCH', next_settings=str(settings))
@@ -954,14 +1061,17 @@ class ImplementationLoop:
         session_id = lane.get('session_id')
         if not session_id:
             return state
-        baseline = next((row for row in read() if row['id'] == state.get('baseline_id')),
-                        None) if state['status'] == 'CODED' else best_record(item['case'])
+        parent_id = state.get('baseline_id') if state['status'] == 'CODED' else item.get('parent_record')
+        baseline = next((row for row in read() if row['id'] == parent_id), None) \
+            if parent_id else best_record(item['case'])
         if baseline is None:
-            raise ValueError('已编码实验的基线记录不可取回')
+            raise ValueError('指定的结构父版记录不可取回')
+        if baseline.get('id', '').startswith('research-'):
+            research_parent(baseline, item['case'])
         snapshot = state_path.parent / 'source'
         try:
             base_config = snapshot / 'workspace/implementation-baseline.json'
-            source_release = Path(baseline['candidate']).name
+            source_release = parent_anchor(baseline)
             baseline_build = snapshot / 'workspace/implementation-builds/baseline'
             if state['status'] == 'QUEUED':
                 save('SNAPSHOTTING', baseline_id=baseline['id'])
@@ -976,6 +1086,8 @@ class ImplementationLoop:
                 run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'build', str(base_config),
                     '--out', str(baseline_build), '--verify', str(snapshot / 'data/releases' / source_release)],
                     'baseline-build', timeout=300)
+                snapshot_generator_hashes = {str(p.relative_to(snapshot)): digest(p)
+                    for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
                 save('CODING', snapshot=str(snapshot))
                 coding = coding_turn(snapshot, self.campaign, session_id, item, baseline,
                                     self.code_timeout, self.model, self.effort)
@@ -987,6 +1099,25 @@ class ImplementationLoop:
                         digest(snapshot / 'data/experiments.jsonl') != ledger_hash or \
                         digest(snapshot / 'data/releases' / source_release / 'local-grade.json') != release_report_hash:
                     raise ValueError('编码回合修改了冻结依据或实验账本')
+                stop_path = snapshot / 'workspace/implementation-input/stop.json'
+                if stop_path.is_file():
+                    stop = load(stop_path)
+                    if not isinstance(stop, dict) or set(stop) != {
+                            'schema_version', 'mechanism_id', 'reason', 'evidence'} or \
+                            stop['schema_version'] != 1 or \
+                            stop['mechanism_id'] != item.get('transformation_id') or \
+                            not isinstance(stop['reason'], str) or not 20 <= len(stop['reason']) <= 2000 or \
+                            not isinstance(stop['evidence'], list) or not 1 <= len(stop['evidence']) <= 16 or \
+                            any(not isinstance(value, str) or not 10 <= len(value) <= 1000
+                                for value in stop['evidence']):
+                        raise ValueError('静态否证文件格式或机制身份无效')
+                    changed_generator = {str(p.relative_to(snapshot)): digest(p)
+                                         for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
+                    if changed_generator != snapshot_generator_hashes:
+                        raise ValueError('静态否证不能携带未经验证的生成器改动')
+                    save('REJECTED', reason=stop['reason'], static_evidence=stop['evidence'],
+                         rejection_kind='static_refutation')
+                    return state
                 save('CODED')
                 if phase == 'code':
                     return state
@@ -1070,6 +1201,13 @@ class ImplementationLoop:
                              'hbm_write_bytes': timing.get('hbm_write_bytes')})
                 return state
             if gain < self.min_case_gain:
+                research_record = record_research_candidate(snapshot, item, candidate, estimate, gain)
+                save('RESEARCH_READY', case_gain=gain, research_record=research_record,
+                     session_id=session_id,
+                     timing={'cycles': timing['cycles'],
+                             'peak_window_power_w': timing['peak_window_power_w']})
+                return self.finish_research(item, state, save)
+            if os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1' and origin_root() == ROOT:
                 research_record = record_research_candidate(snapshot, item, candidate, estimate, gain)
                 save('RESEARCH_READY', case_gain=gain, research_record=research_record,
                      session_id=session_id,

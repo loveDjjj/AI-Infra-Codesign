@@ -107,6 +107,12 @@ def apply_decision(pool,triggers,decision):
         identity=item.get('transformation_id')
         if identity is not None and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',identity) is None:
             raise ValueError('结构机制 ID 无效')
+        if item.get('parent_record') and item['parent_record'] not in valid_ids:
+            raise ValueError('结构父版记录不存在')
+        if isinstance(item.get('parent_record'), str) and item['parent_record'].startswith('research-'):
+            from .implementation import research_parent
+            parent = next(row for row in records if row['id'] == item['parent_record'])
+            research_parent(parent, 'M1_P1' if item['lane'].startswith('p1') else 'M2_D1')
     for item in decision['profile_requests']:
         if item['record_id'] not in valid_ids:raise ValueError('profile 引用不存在的记录')
     # 暂存完整状态；任一目标越域或超预算时不提交任何队列变化。

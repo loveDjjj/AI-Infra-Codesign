@@ -20,7 +20,7 @@ class StructureFamilyInjectionChecks(unittest.TestCase):
             self.assertTrue(implementation.same_campaign_room(campaign))
             state['budget']['reservations'] = {'one': {'kind': 'case', 'reused': False}}
             (campaign / 'state.json').write_text(json.dumps(state))
-            self.assertFalse(implementation.same_campaign_room(campaign))
+            self.assertTrue(implementation.same_campaign_room(campaign))
             state['budget']['reservations'] = {}
             state['budget']['deadline'] = time.time() + 120
             (campaign / 'state.json').write_text(json.dumps(state))
@@ -39,14 +39,24 @@ class StructureFamilyInjectionChecks(unittest.TestCase):
             campaign = root / 'workspace/pipeline/campaign'
             campaign.mkdir(parents=True)
             record = {'id': 'research-first', 'config': {'hardware': {}, 'programs': {
-                'M2_D1': {'config': {'w2_load_group_size': 16}}}},
+                'M2_D1': {'config': {'w2_load_group_size': 16, 'cold_prefetch_group': 4}}}},
                 'source_root': str(source.relative_to(root)),
                 'source_sha256': implementation.snapshot_epoch(source),
                 'research_admission': True}
             pool = targets.TargetPool(campaign, 'main-epoch', max_proposals=8)
             item = {'id': 'first', 'lane': 'd1_decode', 'case': 'M2_D1'}
+            manifest = source / 'workspace/implementation-input/capabilities.json'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({'schema_version': 1, 'family_id': 'd1-cold-v1',
+                'mechanism_id': 'cold-prefetch', 'case': 'M2_D1', 'operator': 'decode.W2',
+                'base_record_id': 'pending', 'registered_source_sha256': 'pending',
+                'variables': {'programs.M2_D1.config.cold_prefetch_group': [4, 8]},
+                'seed_variants': [{'programs.M2_D1.config.cold_prefetch_group': 8}],
+                'critical_checks': ['rf_liveness'], 'stop_if': '单案周期无改善'}))
             with patch.object(targets, 'ROOT', root), patch.object(implementation, 'ROOT', root), \
-                 patch.object(targets, 'read', return_value=[record]):
+                 patch.object(implementation, 'origin_root', return_value=root), \
+                 patch.object(targets, 'read', return_value=[record]), \
+                 patch.object(implementation, 'read', return_value=[record]):
                 request_id = implementation.inject_research_target(campaign, item, record['id'])
                 receipts = pool.consume()
                 self.assertEqual(receipts, [{'status': 'accepted',

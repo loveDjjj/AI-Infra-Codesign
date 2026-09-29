@@ -84,7 +84,7 @@ class Triggers:
         content={identifier:self.completion_revision(target) for identifier,target in sorted(targets.items())}
         return hashlib.sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()
 
-    def poll(self, targets, queued_tasks, now=None, *, review_exhaustion=False):
+    def poll(self, targets, queued_tasks, now=None, *, review_exhaustion=False, supply=None):
         now = time.time() if now is None else now
         ready = []
         lanes = {'global'} if self.global_only else {entry['definition']['lane'] for entry in targets.values()} | set(self.state['lanes'])
@@ -130,6 +130,10 @@ class Triggers:
                 reasons.append('functional_failures')
             if name == 'global' and pool_rev is not None and entry.get('reviewed_pool_revision') != pool_rev:
                 reasons.append('pool_exhausted')
+            if name == 'global' and supply is not None:
+                reasons.append('supply_low')
+                # 供给控制器自身负责有限退避；不再受结果冷却阻挡。
+                result_ready = True
             if not reasons or (not result_ready and entry['last_analysis_wall'] and now - entry['last_analysis_wall'] < self.cooldown):
                 continue
             if entry['pending']:
@@ -145,6 +149,8 @@ class Triggers:
                 content = {**self.identity, 'lane': name, 'observations': [o['id'] for o in new], 'targets': revisions,'profiles':profiles}
                 if name == 'global' and pool_rev is not None:
                     content['pool_revision']=pool_rev
+                if name == 'global' and supply is not None:
+                    content['supply_revision']=supply['revision']
                 identifier = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
                 entry['pending'] = {'decision_id': identifier, 'lane': name, 'reasons': reasons,
                     'observation_ids': [o['id'] for o in new], 'target_ids': completed,

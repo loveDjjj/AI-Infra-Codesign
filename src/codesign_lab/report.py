@@ -1,6 +1,7 @@
 """生成轻量只读看板：最佳指标、优化趋势和真实在途任务。"""
 import html
 import json
+import time
 from datetime import datetime, timezone
 
 from .config import ROOT, load
@@ -91,6 +92,32 @@ def _latest_ai():
     return None
 
 
+def _supply_status():
+    """只读最新未完批次的供给解释，避免把空队列误报为进程故障。"""
+    candidates = sorted((ROOT/'workspace/pipeline').glob('*/state.json'),
+                        key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    for path in candidates:
+        if (path.parent/'summary.json').exists():
+            continue
+        status_path=path.parent/'status.json'
+        if not status_path.is_file() or time.time()-status_path.stat().st_mtime > 120:
+            continue
+        try:
+            value=load(path)
+            supply=value.get('supply',{})
+            budget=value.get('budget',{})
+            return {'campaign':path.parent.name,
+                'coverage_seconds':supply.get('coverage_seconds'),
+                'ready_tasks':supply.get('ready_tasks'),
+                'active_family_tasks':supply.get('active_family_tasks'),
+                'blocked_reason':supply.get('blocked_reason'),
+                'ai_attempts':supply.get('attempts',0),
+                'remaining_wall_seconds':max(0,budget.get('deadline',0)-datetime.now(timezone.utc).timestamp())}
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
 def live_snapshot():
     """HTTP 看板只返回当前指标、短趋势和实时任务，不传历史原件。"""
     rows=_records_cached()
@@ -117,7 +144,8 @@ def live_snapshot():
                 'p1_power_w':metric('M1_P1','peak_window_power_w'),
                 'd1_power_w':metric('M2_D1','peak_window_power_w')} if best else None,
         'promoted_record':state().get('promoted_record'),
-        'trend':points,'tasks':_active_tasks(),'ai':_latest_ai()}
+        'trend':points,'tasks':_active_tasks(),'ai':_latest_ai(),
+        'supply':_supply_status()}
 
 
 def generate():

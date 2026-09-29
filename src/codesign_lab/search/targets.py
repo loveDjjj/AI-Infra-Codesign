@@ -44,7 +44,7 @@ def campaign_path(name):
 
 
 def validate_target(target, source_epoch, records=None, max_trials=128):
-    if not isinstance(target, dict) or set(target) - {'seed', 'max_inflight', 'prior_record_ids'} != FIELDS:
+    if not isinstance(target, dict) or set(target) - {'seed', 'max_inflight', 'prior_record_ids', 'family_manifest', 'variants'} != FIELDS:
         raise ValueError('目标缺少必要字段或含未知字段')
     target = copy.deepcopy(target)
     if type(target['schema_version']) is not int or target['schema_version'] != 1:
@@ -61,6 +61,11 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
         raise ValueError('目标 cases 无效')
     if target['sampler'] not in {'enumerate', 'random', 'tpe'}:
         raise ValueError('当前支持 enumerate/random/tpe')
+    family_target = 'family_manifest' in target or 'variants' in target
+    if family_target and (set(target) & {'family_manifest', 'variants'}) != {'family_manifest', 'variants'}:
+        raise ValueError('实现族目标必须同时提供能力清单和种子')
+    if family_target and target['sampler'] != 'enumerate':
+        raise ValueError('有限实现族种子只允许确定性枚举')
     if 'seed' in target and (type(target['seed']) is not int or not 0 <= target['seed'] < 2**64):
         raise ValueError('seed 必须为 0 到 2**64-1 的整数')
     if type(target['max_trials']) is not int or not 0 < target['max_trials'] <= max_trials:
@@ -74,12 +79,15 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
     if not isinstance(variables, dict) or not variables:
         raise ValueError('目标必须提供真实可搜索变量')
     for path, values in variables.items():
-        if path not in DOMAINS:
+        if not family_target and path not in DOMAINS:
             raise ValueError('未知或未注册的有效变量：' + path)
-        if not isinstance(values, list) or not values or len(values) > len(DOMAINS[path]):
+        if not isinstance(values, list) or not values or len(values) > (8 if family_target else len(DOMAINS[path])):
             raise ValueError('变量值域无效：' + path)
-        if any(type(value) is not int or value not in DOMAINS[path] for value in values) or len(set(values)) != len(values):
+        if not family_target and (any(type(value) is not int or value not in DOMAINS[path] for value in values) or len(set(values)) != len(values)):
             raise ValueError('变量含不受支持的值：' + path)
+        if family_target and (any(type(value) not in (bool, int, str) for value in values) or
+                len({json.dumps(value,sort_keys=True) for value in values}) != len(values)):
+            raise ValueError('实现族变量值无效：' + path)
         if path.startswith('programs.') and path.split('.')[1] not in cases:
             raise ValueError('变量作用案例与目标 cases 不一致')
         if path.startswith('hardware.') and set(cases) != {'M1_P1', 'M2_D1'}:
@@ -122,6 +130,21 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
                 raise ValueError('冻结实现族 TPE 暂不导入旧源码先验')
             target['execution_root'] = str(source)
             target['execution_sha256'] = actual
+    if family_target:
+        if not origin:
+            # 新 epoch 的本地账本记录相对于自身 ROOT，没有外部 source_root。
+            source = ROOT
+            source_hash = source_epoch
+        else:
+            if source != ROOT and not target.get('execution_root'):
+                raise ValueError('实现族目标必须绑定冻结隔离源码')
+            source_hash = base.get('source_sha256') or source_epoch
+        from .families import load_manifest
+        manifest=load_manifest(source,target['family_manifest'],base_config=base['config'],
+            source_sha256=source_hash,case=cases[0],base_record_id=base['id'])
+        if len(cases)!=1 or target['variables']!=manifest['variables'] or \
+                target['variants']!=manifest['seed_variants'] or target['max_trials']!=len(target['variants']):
+            raise ValueError('目标与冻结实现族能力清单不一致')
     if 'prior_record_ids' in target:
         identifiers=target['prior_record_ids']
         if target['sampler']!='tpe' or not isinstance(identifiers,list) or len(identifiers)>16 or any(not isinstance(identifier,str) or identifier not in by_id for identifier in identifiers) or len(set(identifiers))!=len(identifiers):

@@ -179,6 +179,49 @@ class ImplementationChecks(unittest.TestCase):
             self.assertEqual(result['status'], 'CODED', result.get('error'))
             regression.assert_not_called()
 
+    def test_static_refutation_is_recorded_without_candidate_or_simulator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/current'
+            campaign.mkdir(parents=True)
+            (campaign / 'state.json').write_text(json.dumps({'analysis': {'lanes': {
+                'global': {'session_id': str(uuid.uuid4())}}}}))
+            official = root / 'vendor/official/isolation-manifest.json'
+            official.parent.mkdir(parents=True)
+            official.write_text('{}')
+            baseline = {'id': 'base', 'candidate': 'data/releases/joint28',
+                'config': {'hardware': {}, 'programs': {}}}
+            item = {'id': 'first', 'case': 'M1_P1', 'lane': 'p1_ffn',
+                'source_epoch': 'epoch', 'decision_id': 'decision',
+                'transformation_id': 'ffn-static', 'proposal': '静态核算', 'evidence_ids': []}
+            def snapshot(destination, unused):
+                destination.mkdir(parents=True)
+                (destination / 'data/releases/joint28').mkdir(parents=True)
+                (destination / 'data/releases/joint28/local-grade.json').write_text('{}')
+                (destination / 'data/experiments.jsonl').write_text('')
+                return {}
+            def coding(destination, *args):
+                stop = destination / 'workspace/implementation-input/stop.json'
+                stop.parent.mkdir(parents=True)
+                stop.write_text(json.dumps({'schema_version': 1,
+                    'mechanism_id': 'ffn-static',
+                    'reason': '权重重读量超过可节省的中间激活流量，停止该微块方案',
+                    'evidence': ['M8 每层需要额外读取约三十 MiB 权重']}))
+                return {'coder_session_id': str(uuid.uuid4())}
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'campaign_generator_unchanged', return_value=True), \
+                 patch.object(module, 'verify_official'), \
+                 patch.object(module, 'best_record', return_value=baseline), \
+                 patch.object(module, 'snapshot_project', side_effect=snapshot), \
+                 patch.object(module, 'interpreter', return_value='/usr/bin/python3'), \
+                 patch.object(module, 'run'), \
+                 patch.object(module, 'coding_turn', side_effect=coding), \
+                 patch.object(module, 'run_regression') as regression:
+                result = module.ImplementationLoop(campaign).process(item, phase='code')
+            self.assertEqual(result['status'], 'REJECTED', result.get('error'))
+            self.assertEqual(result['rejection_kind'], 'static_refutation')
+            regression.assert_not_called()
+
     def test_same_proposal_cannot_run_from_worker_and_manual_cli_together(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -501,7 +544,7 @@ class ImplementationChecks(unittest.TestCase):
             self.assertNotIn('resource_stats', power_record['cases']['M1_P1']['timing'])
             self.assertTrue(Path(power_record['report']).is_file())
 
-    def test_next_epoch_only_seeds_affected_case_neighborhood(self):
+    def test_next_epoch_does_not_seed_unrelated_legacy_neighborhood(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory)
             settings = snapshot / 'configs/pipeline.yaml'
@@ -514,28 +557,29 @@ class ImplementationChecks(unittest.TestCase):
                 output = module.seed_next_campaign(snapshot, {'id': 'structure-1', 'case': 'M1_P1'},
                                                    'research-structure-1', str(uuid.uuid4()))
             payload = json.loads((snapshot / 'workspace/next-epoch-targets.json').read_text())
-            self.assertEqual(len(payload['targets']), 1)
-            target = payload['targets'][0]
-            self.assertEqual(target['cases'], ['M1_P1'])
-            self.assertEqual(list(target['variables']), ['programs.M1_P1.config.w2_preload_k'])
-            self.assertEqual(target['base_record'], 'research-structure-1')
+            self.assertEqual(payload['targets'], [])
             self.assertEqual(json.loads(output.read_text())['budget']['max_proposals'], 8)
 
     def test_research_admission_waits_for_global_lock_then_launches(self):
-        loop = module.ImplementationLoop.__new__(module.ImplementationLoop)
-        state = {'status': 'RESEARCH_READY', 'snapshot': '/tmp/isolated',
-                 'research_record': 'research-one', 'session_id': str(uuid.uuid4())}
-        def save(status, **fields):
-            state.update(status=status, **fields)
-        with patch.object(module, 'seed_next_campaign', return_value=Path('/tmp/settings.json')) as seed, \
-             patch.object(module, 'launch_next', side_effect=[None, {'pid': 123}]) as launch:
-            loop.finish_research({'id': 'one'}, state, save)
-            self.assertEqual(state['status'], 'WAITING_FOR_LAUNCH')
-            self.assertEqual(state['research_record'], 'research-one')
-            loop.finish_research({'id': 'one'}, state, save)
-            self.assertEqual(state['status'], 'LAUNCHED')
-            self.assertEqual(seed.call_count, 2)
-            self.assertEqual(launch.call_count, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            manifest = snapshot / 'workspace/implementation-input/capabilities.json'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('{}')
+            loop = module.ImplementationLoop.__new__(module.ImplementationLoop)
+            state = {'status': 'RESEARCH_READY', 'snapshot': str(snapshot),
+                     'research_record': 'research-one', 'session_id': str(uuid.uuid4())}
+            def save(status, **fields):
+                state.update(status=status, **fields)
+            with patch.object(module, 'seed_next_campaign', return_value=snapshot / 'settings.json') as seed, \
+                 patch.object(module, 'launch_next', side_effect=[None, {'pid': 123}]) as launch:
+                loop.finish_research({'id': 'one'}, state, save)
+                self.assertEqual(state['status'], 'WAITING_FOR_LAUNCH')
+                self.assertEqual(state['research_record'], 'research-one')
+                loop.finish_research({'id': 'one'}, state, save)
+                self.assertEqual(state['status'], 'LAUNCHED')
+                self.assertEqual(seed.call_count, 2)
+                self.assertEqual(launch.call_count, 2)
 
     def test_audited_small_gain_enters_research_without_promotion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -550,6 +594,9 @@ class ImplementationChecks(unittest.TestCase):
                 state.update(status=status, **fields)
             item = {'id': 'proposal', 'case': 'M1_P1'}
             record = {'id': 'audited-case', 'audited': True}
+            capability = snapshot / 'workspace/implementation-input/capabilities.json'
+            capability.parent.mkdir(parents=True)
+            capability.write_text('{}')
             with patch.object(module, 'grade_record', return_value=record), \
                  patch.object(module, 'audited_best_score', return_value=1000), \
                  patch.object(module, 'export_epoch_record') as export, \
@@ -585,6 +632,9 @@ class ImplementationChecks(unittest.TestCase):
             def save(status, **fields):
                 state.update(status=status, **fields)
             item = {'id': 'proposal', 'case': 'M1_P1'}
+            capability = snapshot / 'workspace/implementation-input/capabilities.json'
+            capability.parent.mkdir(parents=True)
+            capability.write_text('{}')
             with patch.object(module, 'grade_record') as lookup, \
                  patch.object(module, 'export_epoch_record') as export, \
                  patch.object(module, 'seed_next_campaign', return_value=snapshot / 'settings.json'), \

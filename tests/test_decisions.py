@@ -61,7 +61,7 @@ class DecisionChecks(unittest.TestCase):
         self.decision['new_targets'] = []
         self.decision['implementation_proposals'] = [{
             'lane': 'p1_w2', 'transformation_id': 'w2-input-reuse',
-            'proposal': '复用输入块', 'evidence_ids': ['base']}]
+            'proposal': '复用输入块', 'parent_record': '', 'evidence_ids': ['base']}]
         with patch('codesign_lab.search.decisions.read',return_value=self.records), \
              patch('codesign_lab.search.decisions.append_decision') as record:
             self.assertEqual(apply_decision(self.pool,self.triggers,self.decision)['status'],'accepted')
@@ -71,7 +71,7 @@ class DecisionChecks(unittest.TestCase):
         self.decision['new_targets'] = []
         self.decision['implementation_proposals'] = [{
             'lane': 'p1_w2', 'transformation_id': '../escape',
-            'proposal': '无效 ID', 'evidence_ids': ['base']}]
+            'proposal': '无效 ID', 'parent_record': '', 'evidence_ids': ['base']}]
         with patch('codesign_lab.search.decisions.read',return_value=self.records):
             with self.assertRaisesRegex(ValueError,'结构机制 ID'):
                 apply_decision(self.pool,self.triggers,self.decision)
