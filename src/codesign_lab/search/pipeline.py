@@ -696,6 +696,16 @@ class Pipeline:
                     entry.update(status='REJECTED',error=str(exc))
                     self.notify_profile(identity)
 
+    def has_unmaterialized_profile_requests(self):
+        """AI 决策已确认，但下一轮循环尚未把 profile 请求变成任务。"""
+        statuses=self.pool.state.get('profiles',{})
+        for accepted in self.pool.state.get('applied_decisions',{}).values():
+            for request in accepted['decision'].get('profile_requests',[]):
+                identity=key([request['record_id'],request['case'],self.pool.source_epoch])
+                if identity not in statuses:
+                    return True
+        return False
+
     def notify_profile(self,identity):
         """成功与失败均通知订阅 lane；失败没有虚构性能指标。"""
         entry=self.pool.state['profiles'][identity]
@@ -1264,6 +1274,10 @@ class Pipeline:
                     global_lane=self.triggers.lane('global')
                     if (revision is not None and global_lane.get('reviewed_pool_revision') == revision
                             and not global_lane.get('pending')):
+                        if self.has_unmaterialized_profile_requests():
+                            self.process_profile_requests()
+                            self.pool.save()
+                            continue
                         print(json.dumps({'event':'search_exhausted',
                             'reason':'全局分析已确认该目标池版本，无可执行新目标；提前结束而非空转至预算截止',
                             'pool_revision':revision},ensure_ascii=False),flush=True)

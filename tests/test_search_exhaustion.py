@@ -7,15 +7,28 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from codesign_lab.search.decisions import apply_decision
 from codesign_lab.search.locks import acquire
+from codesign_lab.search.pipeline import Pipeline, key
 from codesign_lab.search.targets import TargetPool
 from codesign_lab.search.triggers import Triggers
 
 
 class SearchExhaustionChecks(unittest.TestCase):
+    def test_profile_request_is_not_lost_at_pool_exhaustion(self):
+        controller=Pipeline.__new__(Pipeline)
+        request={'record_id':'new-best','case':'M1_P1','reason':'核对功耗峰值'}
+        controller.pool=SimpleNamespace(source_epoch='epoch',state={
+            'applied_decisions':{'decision':{'decision':{'profile_requests':[request]}}},
+            'profiles':{}})
+        self.assertTrue(controller.has_unmaterialized_profile_requests())
+        identity=key(['new-best','M1_P1','epoch'])
+        controller.pool.state['profiles'][identity]={'status':'QUEUED'}
+        self.assertFalse(controller.has_unmaterialized_profile_requests())
+
     def test_real_lock_contention_waits_then_succeeds(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'lock'
