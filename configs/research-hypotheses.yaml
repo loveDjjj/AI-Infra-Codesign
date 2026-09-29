@@ -2,41 +2,17 @@
   "schema_version": 1,
   "hypotheses": [
     {
-      "transformation_id": "p1-w2-nk-tree-reduction-v2",
-      "lane": "p1_w2",
-      "parent_record": "research-0cb76e11b1d15cb88dc3",
-      "evidence_ids": [
-        "research-0cb76e11b1d15cb88dc3"
-      ],
-      "proposal": "从已准入的 W2 N/K 四路滚动归并 M16 研究版继续，不允许退回全局最佳生成器。仅改变四路 partial 的归并拓扑：先并行完成两对局部归并，再由原 owner 合并，保持分片、权重加载、M16、输出和行末屏障不变。先静态证明交换逻辑字节不增加、RF 生命周期与读写依赖合法；否则写 stop.json。默认关闭必须逐字节再生研究父版；打开后通过 seed7/123 功能、竞态和单案时序。分别对照父版 396045 周期和全局最佳 391510 周期，功耗超过20W或局部无改善即停止。"
+      "transformation_id": "hw-vec16-native-hotspots-v2",
+      "lane": "hardware",
+      "evidence_ids": ["research-a1405fe3631c3615d777", "continuous-v4b-20260929-01-full-6f305e86e4b2c73697bc685c45652a6bbb0690ae283ad43d8a2d986793298395"],
+      "proposal": "从可再生的单源码已审计整案出发，研究 vec16 的原生热点布局，不复用此前通用 RF 成对拆分作为新机制。先核对冠军 P1 的 w2_preload_local_throttle、w2_input_stage_align、final_prompt_direct_output 在新配置中是否等价保留；缺字段只视为待核实。利用已测失败记录定位 P1 增加的 35946 条指令和 4185088 字节 HBM 读取来自哪些算子，并定位 20.344 W 峰值窗口。先交付数值化 TC/RF/并行/流量成本前检；若新热点布局不能同时解释减少适配开销和控制功耗，应静态停止。否则只实现一套默认关闭的原生 vec16 布局及二至四个真正改变热点成本的合法代表点，两案均通过功能和时序；不把仅压功耗而周期仍落后冠军视为成功。"
     },
     {
-      "transformation_id": "p1-qkv-head-layout-v1",
-      "lane": "p1_attention",
-      "evidence_ids": [
-        "official-1790649388563184258"
-      ],
-      "proposal": "研究 P1 QKV 输出到 attention 输入的 head 布局边界，先用当前最佳 profile 量化 QKV 输出写入、attention 读回与 scratch copy 的绝对服务及关键路径成本；若边界成本很低，交付 stop.json，不制造候选。仅选择一个合法的 head 对齐生产者消费者模板，保持公共 K/V 输出、注意力数值顺序和最终 ABI 不变；不得声称直接融合完整 QKV、attention 与 WO。默认关闭时逐字节复现已审计基线，打开后通过局部功能、seed7/123 完整功能和单案时序，记录新增 RF、布局转换和通信成本。"
-    },
-    {
-      "transformation_id": "d1-head-aligned-boundary-v1",
+      "transformation_id": "d1-head-boundary-matched-trace-v2",
       "lane": "d1_decode",
-      "evidence_ids": [
-        "research-415918028abfa7f93caf"
-      ],
-      "proposal": "研究 D1 QKV 到 attention 或 attention 到 WO 的一个反复发生的 head 布局边界，优先后七步热路径；只选真实 profile 中有可测交换或 scratch 读回成本的单一边界。先核对公共 K/V 输出、STEP.COMMIT 和输入释放约束，禁止提前读取未来 token。若边界开销无法量化或 RF/布局不合法，写 stop.json；否则实现默认关闭的有界 head 对齐模板，保持其他算子不变。交付能够改变真实 ASM 的1至3个合法参数种子，经 seed7/123 功能和单案时序验证，不以冷首步的微小收益代替热路径收益。"
-    },
-    {
-      "transformation_id": "hw-vector-rf-joint-v1",
-      "lane": "hardware",
-      "evidence_ids": ["official-1790652680584170255"],
-      "proposal": "联合研究 vector_lanes 16 与两案 RF 视图重排。以可再生的单源码已审计整案为基线，先由官方硬件菜单和面积公式筛掉非法资源，再检查 P1 的 LN/GELU/softmax 与 D1 热步骤中向量服务是否足以抵消 RF 单 lane 容量下降。必须同时适配 M1_P1 和 M2_D1，给出至少两个硬件—软件代表点和真正支持的有限参数域；默认关闭路径逐字节再生基线。若 RF 生命周期或静态面积否证，交付 stop.json。不得只把 vector_lanes 字段改大而沿用不合法旧布局。"
-    },
-    {
-      "transformation_id": "hw-sm-matrix-mapping-v1",
-      "lane": "hardware",
-      "evidence_ids": ["official-1790652680584170255"],
-      "proposal": "联合研究更多但较小 SM 与矩阵阵列、RF 端口配比，避免只扫硬件 JSON。先选择官方菜单中面积合格的 24SM 或 32SM 一种模板，并同步改两案 workgroup 映射、权重分配和必要归并。用静态资源账明确哪些算子有并行收益、哪些 NoC 与 RF 服务会增加，再给出少量可构建的完整硬件—软件种子及受约束搜索域。默认关闭时逐字节再生单源码已审计基线；若旧代码写死 16SM 无法可靠适配，要明确停止原因而非把非法构建当成硬件失败。"
+      "parent_record": "research-415918028abfa7f93caf",
+      "evidence_ids": ["research-415918028abfa7f93caf", "research-82ed6dd27242b8c67f00"],
+      "proposal": "严格从已准入的 D1 41737 周期研究实现及其逐字节匹配 trace 出发，只研究后七步重复发生的 attention 输出到 WO 或 QKV 到 attention 的一个边界。先核对隔离目录 workspace/implementation-evidence/receipt.json 中的匹配 trace、operator map、硬件和 ASM 身份；若仍缺必要事件证据，返回 needs-evidence.json，明确 record_id、M2_D1、问题和 matching_trace/operator_map，主控准备后恢复本会话。若边界载荷或依赖表明所选模板没有可回收空间，静态停止；否则实现默认关闭、有界且合法的生产者消费者布局，交付少量真实不同的参数点，保持公共 K/V、STEP.COMMIT、输入释放和数值顺序。"
     }
   ]
 }

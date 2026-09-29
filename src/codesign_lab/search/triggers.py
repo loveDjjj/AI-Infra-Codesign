@@ -119,8 +119,8 @@ class Triggers:
                    item['case_gain'] >= .01 for item in new):
                 reasons.append('implementation_result')
                 result_ready = True
-            if any(entry['profiles'][identifier].get('status') in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_failed')
-            if any(entry['profiles'][identifier].get('status') not in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_ready')
+            if any(entry['profiles'][identifier].get('status') in {'FAILED','REJECTED','BLOCKED_BUDGET'} for identifier in profiles):reasons.append('profile_failed')
+            if any(entry['profiles'][identifier].get('status') not in {'FAILED','REJECTED','BLOCKED_BUDGET'} for identifier in profiles):reasons.append('profile_ready')
             if completed:
                 reasons.append('target_completion')
             if len(new) >= self.batch_size:

@@ -682,6 +682,10 @@ class Pipeline:
                     '硬件改变必须覆盖P1和D1。若只有小收益且可表达的参数空间已经覆盖，转而提出具体实现变更假设。'
                     '当本轮最好单案仍慢于 best_audited_cases 且已覆盖原参数邻域时，优先给出至少一个'
                     '可用小规模功能与单案测评否证的 implementation_proposals；若不能提出，必须写明缺失的证据。'
+                    '失败先分流：有已声明且真正不同的代表点则让程序试点；有共享代码错误则建议有限修复；'
+                    '缺匹配 trace 或事件证据时使用 profile_requests 请求具体 record_id 与 case，'
+                    '不能只在 summary 写“证据不足”；静态账明显劣势则退出该模板并换机制。'
+                    '性能收益尚未证明不是禁止有界对照的理由，但不得编造合法性和实测因果。'
                     '若本轮不新增目标，在summary说明待验证的具体证据、预计队列耗尽时间、为何不能并行验证其他机制；'
                     '不能只写等待其他任务。结构提案需先说明过去失败机制与一个便宜的否证实验。'
                     '结构任务的预算耗尽和基础设施错误不是性能观测，不得据此判定结构无效。'
@@ -695,9 +699,14 @@ class Pipeline:
     def global_snapshot(self):
         """跨方向只给短事实及记录ID；可读原件仍由只读分析者按需查看。"""
         rows=read()
+        family_dir=ROOT/'workspace/implementation-loop'/self.out.name
+        family_states=[load(path) for path in
+            (family_dir.glob('*/state.json') if family_dir.is_dir() else [])]
+        research_ids={state.get('research_record') for state in family_states}
         facts=[]
         for record in rows:
-            if record.get('campaign') != self.out.name or record.get('scope') not in {'both','full'}:
+            if (record.get('campaign') != self.out.name and record.get('id') not in research_ids) or \
+                    record.get('scope') not in {'both','full'}:
                 continue
             config=record.get('config',{})
             hardware=config.get('hardware',{})
@@ -708,7 +717,14 @@ class Pipeline:
                     continue
                 facts.append({'record_id':record['id'],'case':case,'cycles':timing['cycles'],
                     'peak_power_w':timing.get('peak_window_power_w'),
+                    'instruction_count':timing.get('instruction_count'),
+                    'hbm_read_bytes':timing.get('hbm_read_bytes'),
+                    'hbm_write_bytes':timing.get('hbm_write_bytes'),
                     'functional_passed':info.get('functional_passed'),
+                    'research_admission':record.get('research_admission'),
+                    'family_pilot_approved':record.get('family_pilot_approved'),
+                    'comparison':record.get('outcome',{}).get('comparison') if isinstance(record.get('outcome'),dict) else None,
+                    'constraints':record.get('outcome',{}).get('constraints') if isinstance(record.get('outcome'),dict) else None,
                     'source_root':record.get('source_root'),
                     'hardware':{name:hardware.get(name) for name in ('cache_mib','reduction_units','sfu_lanes')},
                     'p1':{name:settings.get(name) for name in ('w1_preload_k','w2_preload_k',
@@ -753,6 +769,12 @@ class Pipeline:
                     'proposed':entry.get('trials_launched'),'completed':entry.get('trials_completed')}
                     for key,entry in self.pool.state['targets'].items()],
                 'case_facts':facts[-80:],
+                'implementation_states':[{'mechanism_id':state.get('proposal',{}).get('transformation_id'),
+                    'status':state.get('status'),'research_record':state.get('research_record'),
+                    'reason':state.get('reason'),'case_gain':state.get('case_gain'),
+                    'outcome':state.get('outcome'),
+                    'evidence_request':state.get('evidence_request')}
+                    for state in family_states[-8:]],
                 'available_family_bases':family_bases[-8:],
                 'structure_parent_rule':'若结构提案必须继承某个研究实现，必须填写 parent_record 为该已准入研究记录 ID；不得仅在文字中描述继承关系。未经准入或源码已丢失的研究记录不可作为父版。',
                 'available_base_records':available[-12:],
@@ -765,25 +787,49 @@ class Pipeline:
 
     def process_profile_requests(self):
         """profile 先重建核对字节，再占探索槽位进行真实时序跟踪。"""
-        from .profiles import inputs
+        from .profiles import inputs, matching_trace
         records={record['id']:record for record in read()}
         statuses=self.pool.state.setdefault('profiles',{})
+        requests=[]
         for decision_id,accepted in self.pool.state.get('applied_decisions',{}).items():
             for request in accepted['decision']['profile_requests']:
+                requests.append((decision_id, accepted['lane'], request, None))
+        directory=ROOT/'workspace/implementation-loop'/self.out.name
+        for path in directory.glob('*/state.json') if directory.is_dir() else []:
+            state=load(path)
+            if state.get('status')=='NEEDS_EVIDENCE':
+                need=state['evidence_request']
+                requests.append(('implementation-'+path.parent.name, 'global',
+                    {'record_id':need['record_id'],'case':need['case'],
+                     'reason':need['question']}, path))
+        for decision_id,lane,request,source_state in requests:
                 identity=key([request['record_id'],request['case'],self.pool.source_epoch])
                 if identity in statuses:
                     entry=statuses[identity]
                     lanes=entry.setdefault('lanes',[entry['lane']])
-                    if accepted['lane'] not in lanes:
-                        lanes.append(accepted['lane'])
-                        if entry['status'] in {'DONE','FAILED','REJECTED'}:self.notify_profile(identity)
+                    if lane not in lanes:
+                        lanes.append(lane)
+                        if entry['status'] in {'DONE','FAILED','REJECTED','BLOCKED_BUDGET'}:self.notify_profile(identity)
+                    if source_state:
+                        sources=entry.setdefault('source_states',[])
+                        if str(source_state) not in sources:sources.append(str(source_state))
+                        if entry['status'] in {'DONE','FAILED','REJECTED','BLOCKED_BUDGET'}:self.notify_profile(identity)
                     continue
-                entry={'record_id':request['record_id'],'case':request['case'],'lane':accepted['lane'],
-                       'lanes':[accepted['lane']],'decision_id':decision_id,'status':'QUEUED','reason':request['reason']}
+                entry={'record_id':request['record_id'],'case':request['case'],'lane':lane,
+                       'lanes':[lane],'decision_id':decision_id,'status':'QUEUED','reason':request['reason'],
+                       'source_states':[str(source_state)] if source_state else []}
                 statuses[identity]=entry
                 try:
                     record=records[request['record_id']]
                     original,report=inputs(record,request['case'])
+                    reused=matching_trace(record,request['case'])
+                    if reused:
+                        entry.update(status='DONE',evidence={'path':reference(reused),
+                            'sha256':digest(reused)},summary={'record_id':record['id'],
+                            'case':request['case'],'status':'DONE','reused':True,
+                            'evidence':{'path':reference(reused),'sha256':digest(reused)}})
+                        self.notify_profile(identity)
+                        continue
                     source_root=Path(record.get('source_root') or ROOT)
                     source_root=(source_root if source_root.is_absolute() else ROOT/source_root).resolve()
                     if source_root != ROOT:
@@ -832,6 +878,27 @@ class Pipeline:
             'scope':'诊断请求失败，不是性能观测'}
         for lane in entry.get('lanes',[entry['lane']]):
             self.triggers.profile_ready(lane,identity,summary)
+        for path in entry.get('source_states',[]):
+            state_path=Path(path)
+            if not state_path.is_file():continue
+            state=load(state_path)
+            if state.get('status')!='NEEDS_EVIDENCE':continue
+            if entry['status']=='DONE':
+                from .implementation import provision_parent_evidence
+                parent=next((row for row in read() if row['id']==entry['record_id']),None)
+                receipt=provision_parent_evidence(Path(state['snapshot']),parent,
+                    entry['case']) if parent and state.get('snapshot') else None
+                if receipt is None:
+                    state.update(status='EVIDENCE_BLOCKED',evidence_error='匹配诊断未能复制到隔离源码',
+                                 updated_wall=time.time())
+                else:
+                    state.update(status='EVIDENCE_READY',evidence={'summary':summary,
+                        'local_receipt':receipt},updated_wall=time.time())
+            elif entry['status'] in {'FAILED','REJECTED','BLOCKED_BUDGET'}:
+                state.update(status='BLOCKED_BUDGET' if entry['status']=='BLOCKED_BUDGET'
+                             else 'EVIDENCE_BLOCKED',evidence_error=summary,
+                             updated_wall=time.time())
+            atomic_json(state_path,state)
 
     def reconcile_target_controls(self):
         """缩减预算只撤回未启动候选，共享任务随后按剩余订阅处理。"""
@@ -1063,9 +1130,9 @@ class Pipeline:
             state_data = load(state) if state.exists() else {}
             status = state_data.get('status', 'QUEUED')
             if status in TERMINAL | {'WAITING_FOR_LAUNCH'} or status not in {
-                    'QUEUED', 'CODED', 'OFFICIAL_QUEUED', 'GRADED', 'RESEARCH_READY'}:
+                    'QUEUED', 'EVIDENCE_READY', 'CODED', 'OFFICIAL_QUEUED', 'GRADED', 'RESEARCH_READY'}:
                 continue
-            phase = ('code' if status == 'QUEUED' else
+            phase = ('code' if status in {'QUEUED','EVIDENCE_READY'} else
                      'official' if status == 'OFFICIAL_QUEUED' else 'validate')
             if identifier not in known_families and len(known_families) >= family_limit:
                 continue
@@ -1175,7 +1242,8 @@ class Pipeline:
                     # 校验不满足可恢复条件时保留原失败证据，交给全局分析。
                     state = load(state_path)
                     status = state['status']
-            if status in {'REJECTED', 'RESEARCH_PAUSED', 'FAILED', 'WAITING_FOR_LAUNCH', 'LAUNCHED',
+            if status in {'REJECTED', 'RESEARCH_PAUSED', 'FAILED', 'NEEDS_EVIDENCE',
+                          'EVIDENCE_BLOCKED', 'WAITING_FOR_LAUNCH', 'LAUNCHED',
                           'TARGET_INJECTED',
                           'AUDITED_NO_PROMOTION'}:
                 # 同一提案的恢复验证可能产生新的事实；按持久任务身份区分，
@@ -1190,6 +1258,8 @@ class Pipeline:
                     'case': state.get('proposal', {}).get('case'), 'proposal_status': status,
                     'case_gain': state.get('case_gain'), 'official_score': state.get('official_score'),
                     'timing': timing, 'research_record': state.get('research_record'),
+                    'outcome': state.get('outcome'),
+                    'evidence_request': state.get('evidence_request'),
                     'target_id': state.get('target_id'),
                     'reason': state.get('reason'), 'static_evidence': state.get('static_evidence'),
                     'rejection_kind': state.get('rejection_kind'),
@@ -1203,7 +1273,8 @@ class Pipeline:
             complete(self, job, result)
             return
         if job.get('profile_id') and result['status'] != 'completed':
-            self.pool.state['profiles'][job['profile_id']].update(status='FAILED',
+            self.pool.state['profiles'][job['profile_id']].update(
+                status='BLOCKED_BUDGET' if result['status']=='budget_exhausted' else 'FAILED',
                 error=result.get('error',result['status']),failed_stage=job['stage'])
             self.notify_profile(job['profile_id'])
             self.pool.save()

@@ -5,6 +5,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -33,7 +34,8 @@ def proposal_case(lane):
     raise ValueError('未知结构研究方向')
 ARTIFACTS = ('hardware.json', 'programs/M1_P1.asm', 'programs/M2_D1.asm')
 TERMINAL = {'REJECTED', 'FAILED', 'LAUNCHED', 'AUDITED_NO_PROMOTION', 'BUDGET_EXHAUSTED',
-            'TARGET_QUEUED', 'TARGET_INJECTED', 'RESEARCH_PAUSED'}
+            'TARGET_QUEUED', 'TARGET_INJECTED', 'RESEARCH_PAUSED', 'NEEDS_EVIDENCE',
+            'BLOCKED_BUDGET', 'EVIDENCE_BLOCKED'}
 # 只控制自动追加三个昂贵邻域点；结果和来源仍入账，AI 可以按机制重新提案。
 RESEARCH_GAIN_FLOOR = -0.02
 CONTROLLER_FILES = ('src/codesign_lab/search/implementation.py', 'src/codesign_lab/ai_bridge.py')
@@ -571,7 +573,8 @@ def verify_snapshot_official(snapshot: Path):
 
 
 def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
-                baseline: dict, timeout: int, model: str, effort: str):
+                baseline: dict, timeout: int, model: str, effort: str, *,
+                resume_session=None, evidence=None):
     """每个结构提案使用独立编码会话；全局规划会话保持可用。"""
     import uuid
     uuid.UUID(session_id)
@@ -612,7 +615,11 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
             + config_rule +
             '不要从 configs/best.yaml 或其他历史配置复制。编码阶段不得运行 lab run、'
             '评估器、模拟器，亦不得修改 data/experiments.jsonl 或任何冻结报告；'
-            '这些由统一 worker 在代码交付后执行。若静态资源账已否证机制，'
+            '这些由统一 worker 在代码交付后执行。若仅缺少与父版严格匹配的事件证据，'
+            '不要把机制写成静态否证；在 workspace/implementation-input/needs-evidence.json '
+            '写入 schema_version=1、record_id=父版记录ID、case=受影响案例、'
+            'question=具体待回答问题、required_artifacts=["matching_trace","operator_map"]。'
+            '控制器将准备证据后恢复同一编码会话。若静态资源账已否证机制，'
             '不修改生成器也不伪造 config.json，而在 '
             'workspace/implementation-input/stop.json 写入严格 JSON：'
             '{"schema_version":1,"mechanism_id":"当前机制ID",'
@@ -626,16 +633,33 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
             'expansion_gain(相对当前合格最佳的最低扩展收益，建议0.002)、'
             'critical_checks(列表)、stop_if(明确停止条件)。种子必须相对候选配置不同且由代码真实支持；'
             '没有有效族内变量时不必伪造清单，控制器将只保存单案结果。完成后说明改动。\n'
+            + ('联合硬件任务必须写 workspace/implementation-input/cost-screen.json：'
+               'schema_version=1，hotspots为1至8个主要热点，每项含name、tc_ratio、'
+               'rf_ratio、parallel_ratio、traffic_ratio（候选相对父版的正数比值）及具体evidence。'
+               'TC与RF服务同时恶化且并行不足时应停止该模板。\n' if joint else '') +
             '受影响案例：' + item['case'] + '\n机制 ID：' +
             str(item.get('transformation_id')) + '\n结构提案：' + item['proposal'] + '\n'
             '本项目证据摘要：' + json.dumps(evidence, ensure_ascii=False) + '\n'
             '父版记录：' + baseline['id'] + '；本隔离副本已从该父版冻结源码恢复并逐字节核验其程序。\n基线配置：' +
             json.dumps(baseline['config'], ensure_ascii=False) + '\n'
+            '如 workspace/implementation-evidence/receipt.json 存在，先核对其父版ID、'
+            'trace 哈希与目标 ASM；匹配证据已经复制到本隔离目录，无需再次请求。'
             '请先阅读本副本 AGENTS.md 和相关生成器源码。')
         executable = os.environ.get('CODEX_IMPLEMENTATION_CLI', 'codex')
-        command = [executable, 'exec', '--sandbox', 'workspace-write', '-C', str(snapshot),
-                   '-m', model, '-c', 'model_reasoning_effort="' + effort + '"',
-                   '--json', '-o', str(output), '-']
+        if resume_session:
+            prompt = ('继续同一结构实现任务。匹配父版的诊断已准备：' +
+                json.dumps(evidence, ensure_ascii=False) +
+                '。先核对证据中的输入身份，再读取可用 trace 与 operator map。'
+                '删除旧 needs-evidence.json，之后交付 config.json 及必要的生成器代码；'
+                '若具体模板被证据否证，按原任务要求交付 stop.json。')
+            command = [executable, 'exec', '--sandbox', 'workspace-write', '-C',
+                str(snapshot), 'resume', resume_session, '-m', model,
+                '-c', 'model_reasoning_effort="' + effort + '"', '--json',
+                '-o', str(output), '-']
+        else:
+            command = [executable, 'exec', '--sandbox', 'workspace-write', '-C', str(snapshot),
+                       '-m', model, '-c', 'model_reasoning_effort="' + effort + '"',
+                       '--json', '-o', str(output), '-']
         logs = origin_root() / 'workspace/agent-calls/implementation' / item['id']
         logs.mkdir(parents=True, exist_ok=True)
         with (logs / 'codex.events.jsonl').open('w') as stdout, (logs / 'codex.stderr.log').open('w') as stderr:
@@ -800,7 +824,8 @@ def snapshot_epoch(snapshot: Path):
 
 
 def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estimate: Path,
-                              gain: float, *, admission=True):
+                              gain: float, *, admission=True, outcome=None,
+                              family_pilot_approved=False):
     """保存有真实单案结果的结构事实；超功耗候选仅供分析和诊断。"""
     from ..evaluation.pipeline import compact_cases
     import datetime
@@ -823,6 +848,7 @@ def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estim
               'report': str(estimate.relative_to(snapshot)),
               'candidate': str(candidate.relative_to(snapshot)),
               'artifact_sha256': artifacts(candidate), 'case_gain': gain,
+              'outcome': outcome, 'family_pilot_approved': family_pilot_approved,
               'eligible': None if admission else False, 'score': None, 'audited': False,
               'reproduction': 'record_only', 'source_epoch': snapshot_epoch(snapshot),
               'parent_decision': item['decision_id'], 'research_admission': admission,
@@ -842,6 +868,120 @@ def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estim
                 output.flush(); os.fsync(output.fileno())
     export_research_record(snapshot, record)
     return identifier
+
+
+def measured_outcome(snapshot: Path, item: dict, estimate: Path, source_release: str):
+    """资格与真实性能分开保存；联合失败也保留两案的完整比较。"""
+    report = load(estimate)
+    parent = load(snapshot / 'data/releases' / source_release / 'local-grade.json')
+    cases = ('M1_P1', 'M2_D1') if item['case'] == 'both' else (item['case'],)
+    metrics = {}
+    for case in cases:
+        info = report['cases'][case]
+        timing = info['timing']
+        metrics[case] = {'functional_passed': info.get('functional_passed'),
+            **{name: timing.get(name) for name in ('cycles', 'peak_window_power_w',
+                'instruction_count', 'hbm_read_bytes', 'hbm_write_bytes')}}
+    product = lambda rows, names: math.prod(rows[name]['cycles'] for name in names)
+    observed_product = product(metrics, cases)
+    parent_metrics = {name: {'cycles': parent['cases'][name]['timing']['cycles']}
+                      for name in cases}
+    parent_ratio = observed_product / product(parent_metrics, cases)
+    try:
+        champion = max((row for row in read() if row.get('scope') == 'full' and
+            row.get('audited') is True and row.get('eligible') is True and
+            isinstance(row.get('score'), (int, float))), key=lambda row: row['score'])
+        champion_metrics = {name: {'cycles': champion['cases'][name]['timing']['cycles']}
+                            for name in cases}
+    except (ValueError, KeyError):
+        # 独立重放夹具可能只提供父版；真实批次在开始前要求已审计冠军。
+        champion = {'id': item.get('parent_record') or parent.get('id')}
+        champion_metrics = parent_metrics
+    champion_ratio = observed_product / product(champion_metrics, cases)
+    baseline_path = origin_root() / 'vendor/official/baseline_manifest.json'
+    baseline_cycles = load(baseline_path).get('baseline_cycles', {}) if baseline_path.is_file() else {}
+    return {'case_metrics': metrics,
+        'comparison': {'parent_record_id': item.get('parent_record') or parent.get('id') or source_release,
+            'champion_record_id': champion['id'],
+            'product_ratio_to_parent': parent_ratio,
+            'product_ratio_to_champion': champion_ratio,
+            'score_ratio_ignoring_gates': champion_ratio ** -0.5 if len(cases) == 2 else None},
+        'constraints': {'area_mm2': report.get('area_mm2'),
+            'area_ok': report.get('area_mm2', float('inf')) <= 24,
+            'latency_ok_by_case': {name: metrics[name]['cycles'] <= 2 * baseline_cycles[name]
+                if name in baseline_cycles else None for name in cases},
+            'power_ok_by_case': {name: metrics[name]['peak_window_power_w'] <= 20 for name in cases}},
+        'report_ref': str(estimate), 'program_sha256': report.get('program_sha256')}
+
+
+def prepare_family_pilot(snapshot: Path, item: dict, candidate: Path):
+    """先验证能力域，再决定首点的性能是否准入。"""
+    path = snapshot / 'workspace/implementation-input/capabilities.json'
+    if not path.is_file():
+        return False
+    from .families import validate_manifest
+    manifest = load(path)
+    record_id = 'research-' + item['id']
+    manifest['base_record_id'] = record_id
+    manifest['registered_source_sha256'] = snapshot_epoch(snapshot)
+    validate_manifest(manifest, base_config=load(candidate / 'config.json'),
+        source_sha256=manifest['registered_source_sha256'], case=item['case'],
+        base_record_id=record_id)
+    atomic_json(path, manifest)
+    return True
+
+
+def provision_parent_evidence(snapshot: Path, baseline: dict, case: str):
+    """将严格匹配父版输入的现成 trace 放入隔离源码工作区。"""
+    if case not in {'M1_P1', 'M2_D1'}:
+        return None
+    from .profiles import matching_trace
+    try:
+        trace = matching_trace(baseline, case)
+    except (ValueError, OSError):
+        return None
+    if trace is None:
+        return None
+    destination = snapshot / 'workspace/implementation-evidence'
+    destination.mkdir(parents=True, exist_ok=True)
+    copied = destination / 'parent-trace.json'
+    shutil.copyfile(trace, copied)
+    receipt = {'record_id': baseline['id'], 'case': case,
+        'trace': str(copied.relative_to(snapshot)), 'trace_sha256': digest(copied)}
+    candidate = Path(baseline['candidate'])
+    candidate = candidate if candidate.is_absolute() else origin_root() / candidate
+    operator_map = candidate / 'operator-map.json'
+    if operator_map.is_file():
+        mapped = destination / 'parent-operator-map.json'
+        shutil.copyfile(operator_map, mapped)
+        receipt.update(operator_map=str(mapped.relative_to(snapshot)),
+                       operator_map_sha256=digest(mapped))
+    atomic_json(destination / 'receipt.json', receipt)
+    return receipt
+
+
+def check_joint_cost_screen(snapshot: Path):
+    """用热点成本账筛掉明显无补偿的映射；该账不是时序实测。"""
+    path = snapshot / 'workspace/implementation-input/cost-screen.json'
+    if not path.is_file():
+        raise ValueError('硬件联合任务缺少热点静态成本前检')
+    screen = load(path)
+    if not isinstance(screen, dict) or set(screen) != {'schema_version', 'hotspots'} or \
+            screen['schema_version'] != 1 or not isinstance(screen['hotspots'], list) or \
+            not 1 <= len(screen['hotspots']) <= 8:
+        raise ValueError('热点成本前检格式无效')
+    for row in screen['hotspots']:
+        if not isinstance(row, dict) or set(row) != {'name', 'tc_ratio', 'rf_ratio',
+                'parallel_ratio', 'traffic_ratio', 'evidence'} or \
+                not isinstance(row['name'], str) or not isinstance(row['evidence'], str) or \
+                len(row['evidence']) < 20 or any(type(row[key]) not in (int, float) or
+                not 0 < row[key] <= 100 for key in ('tc_ratio', 'rf_ratio',
+                    'parallel_ratio', 'traffic_ratio')):
+            raise ValueError('热点成本前检缺少可核对数值')
+        if min(row['tc_ratio'], row['rf_ratio']) > row['parallel_ratio'] * 1.5 and \
+                row['traffic_ratio'] >= 1:
+            raise ValueError('热点 TC/RF 成本明显超过并行补偿：' + row['name'])
+    return screen
 
 
 def export_research_record(snapshot: Path, record: dict):
@@ -1043,7 +1183,7 @@ class ImplementationLoop:
         state = load(state_path) if state_path.exists() else {'status': 'QUEUED', 'proposal': item}
         if state['status'] in TERMINAL:
             return state
-        if phase == 'code' and state['status'] != 'QUEUED':
+        if phase == 'code' and state['status'] not in {'QUEUED', 'EVIDENCE_READY'}:
             return state
         if phase == 'validate' and state['status'] == 'QUEUED':
             return state
@@ -1051,7 +1191,7 @@ class ImplementationLoop:
             return state
         if state['status'] == 'OFFICIAL_QUEUED' and phase not in {'all', 'official'}:
             return state
-        if state['status'] not in {'QUEUED', 'CODED', 'OFFICIAL_QUEUED', 'GRADED',
+        if state['status'] not in {'QUEUED', 'CODED', 'EVIDENCE_READY', 'OFFICIAL_QUEUED', 'GRADED',
                                   'RESEARCH_READY', 'WAITING_FOR_LAUNCH'}:
             # 崩溃时不重放可能仍在运行的同一 AI 会话或昂贵官方调用。
             return state
@@ -1084,7 +1224,7 @@ class ImplementationLoop:
         session_id = lane.get('session_id')
         if not session_id:
             return state
-        parent_id = state.get('baseline_id') if state['status'] == 'CODED' else item.get('parent_record')
+        parent_id = state.get('baseline_id') if state['status'] in {'CODED', 'EVIDENCE_READY'} else item.get('parent_record')
         baseline = next((row for row in read() if row['id'] == parent_id), None) \
             if parent_id else best_record(None if item['case'] == 'both' else item['case'])
         if baseline is None:
@@ -1114,6 +1254,9 @@ class ImplementationLoop:
                 snapshot_generator_hashes = {str(p.relative_to(snapshot)): digest(p)
                     for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
                 save('CODING', snapshot=str(snapshot))
+                parent_evidence = provision_parent_evidence(snapshot, baseline, item['case'])
+                if parent_evidence:
+                    save('CODING', parent_evidence=parent_evidence)
                 coding = coding_turn(snapshot, self.campaign, session_id, item, baseline,
                                     self.code_timeout, self.model, self.effort)
                 save('CODING', coder_session_id=coding['coder_session_id'])
@@ -1124,6 +1267,24 @@ class ImplementationLoop:
                         digest(snapshot / 'data/experiments.jsonl') != ledger_hash or \
                         digest(snapshot / 'data/releases' / source_release / 'local-grade.json') != release_report_hash:
                     raise ValueError('编码回合修改了冻结依据或实验账本')
+                need_path = snapshot / 'workspace/implementation-input/needs-evidence.json'
+                if need_path.is_file():
+                    need = load(need_path)
+                    if not isinstance(need, dict) or set(need) != {
+                            'schema_version', 'record_id', 'case', 'question',
+                            'required_artifacts'} or need['schema_version'] != 1 or \
+                            need['record_id'] != baseline['id'] or \
+                            need['case'] != item['case'] or item['case'] == 'both' or \
+                            not isinstance(need['question'], str) or \
+                            not 20 <= len(need['question']) <= 1000 or \
+                            need['required_artifacts'] != ['matching_trace', 'operator_map']:
+                        raise ValueError('缺证据请求格式或父版身份无效')
+                    changed_generator = {str(p.relative_to(snapshot)): digest(p)
+                        for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
+                    if changed_generator != snapshot_generator_hashes:
+                        raise ValueError('缺证据请求不能携带未经验证的生成器改动')
+                    save('NEEDS_EVIDENCE', evidence_request=need)
+                    return state
                 stop_path = snapshot / 'workspace/implementation-input/stop.json'
                 if stop_path.is_file():
                     stop = load(stop_path)
@@ -1146,6 +1307,14 @@ class ImplementationLoop:
                 save('CODED')
                 if phase == 'code':
                     return state
+            elif state['status'] == 'EVIDENCE_READY':
+                coding = coding_turn(snapshot, self.campaign, session_id, item, baseline,
+                    self.code_timeout, self.model, self.effort,
+                    resume_session=state['coder_session_id'], evidence=state['evidence'])
+                (snapshot / 'workspace/implementation-input/needs-evidence.json').unlink(missing_ok=True)
+                save('CODED', coder_session_id=coding['coder_session_id'])
+                if phase == 'code':
+                    return state
             elif not all((baseline_build / name).is_file() for name in ARTIFACTS):
                 # 旧控制器把输出放在 workspace 根目录，恢复时重建到稳定的子目录。
                 run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'build', str(base_config),
@@ -1166,6 +1335,8 @@ class ImplementationLoop:
                     raise ValueError('联合硬件配置不合法：' + reason)
                 if config == baseline['config']:
                     raise ValueError('联合任务候选与基线完全相同')
+                if item.get('lane') == 'hardware':
+                    save('COST_SCREENED', cost_screen=check_joint_cost_screen(snapshot))
             else:
                 if config.get('hardware') != baseline['config'].get('hardware'):
                     raise ValueError('本阶段结构实验不得改变硬件')
@@ -1218,58 +1389,66 @@ class ImplementationLoop:
                 ['--functional-report', str(functional),
                 '--seed', '7', '--seed', '123', '--cache-dir', str(cache), '--out', str(estimate)],
                 'estimate', timeout=3600)
+            outcome = measured_outcome(snapshot, item, estimate, source_release)
+            pilot = prepare_family_pilot(snapshot, item, candidate)
             if joint:
                 measured=load(estimate)['cases']
-                original=load(snapshot / 'data/releases' / source_release / 'local-grade.json')['cases']
-                if any(measured[case]['timing']['peak_window_power_w'] > 20
-                       for case in checked_cases):
-                    record_id=record_research_candidate(snapshot,item,candidate,estimate,0,admission=False)
-                    save('REJECTED',reason='联合任务单案峰值功耗超限',research_record=record_id)
-                    return state
-                product=lambda rows: rows['M1_P1']['timing']['cycles']*rows['M2_D1']['timing']['cycles']
-                gain=1-product(measured)/product(original)
+                gain=1-outcome['comparison']['product_ratio_to_parent']
+                power_ok = all(outcome['constraints']['power_ok_by_case'].values())
                 summary={case:{'cycles':measured[case]['timing']['cycles'],
                     'peak_window_power_w':measured[case]['timing']['peak_window_power_w']}
                     for case in checked_cases}
                 record_id=record_research_candidate(snapshot,item,candidate,estimate,gain,
-                    admission=gain>=RESEARCH_GAIN_FLOOR)
-                save('RESEARCH_READY' if gain>=RESEARCH_GAIN_FLOOR else 'RESEARCH_PAUSED',
+                    admission=power_ok and gain>=RESEARCH_GAIN_FLOOR,
+                    outcome=outcome, family_pilot_approved=pilot)
+                continue_pilot = pilot and gain > -0.25
+                status = ('RESEARCH_READY' if (power_ok and gain>=RESEARCH_GAIN_FLOOR)
+                          or continue_pilot else 'REJECTED' if not power_ok else 'RESEARCH_PAUSED')
+                save(status,
                      case_gain=gain,research_record=record_id,session_id=session_id,
-                     timing={'cases':summary},
-                     reason='周期乘积明显退化' if gain<RESEARCH_GAIN_FLOOR else None)
-                return self.finish_research(item,state,save) if gain>=RESEARCH_GAIN_FLOOR else state
+                     timing={'cases':summary}, outcome=outcome,
+                     reason=('联合任务单案峰值功耗超限' if not power_ok else
+                             '周期乘积明显退化' if gain<RESEARCH_GAIN_FLOOR else None))
+                return self.finish_research(item,state,save) if status=='RESEARCH_READY' else state
             timing = load(estimate)['cases'][item['case']]['timing']
             baseline_timing = load(snapshot / 'data/releases' / source_release / 'local-grade.json')['cases'][item['case']]['timing']
             gain = (baseline_timing['cycles'] - timing['cycles']) / baseline_timing['cycles']
             if timing['peak_window_power_w'] > 20:
                 research_record = record_research_candidate(
-                    snapshot, item, candidate, estimate, gain, admission=False)
-                save('REJECTED', reason='单案峰值功耗超限', case_gain=gain,
+                    snapshot, item, candidate, estimate, gain, admission=False,
+                    outcome=outcome, family_pilot_approved=pilot)
+                save('RESEARCH_READY' if pilot and gain > -0.25 else 'REJECTED',
+                     reason='单案峰值功耗超限', case_gain=gain, outcome=outcome,
                      research_record=research_record,
                      timing={'cycles': timing['cycles'],
                              'peak_window_power_w': timing['peak_window_power_w'],
                              'hbm_read_bytes': timing.get('hbm_read_bytes'),
                              'hbm_write_bytes': timing.get('hbm_write_bytes')})
-                return state
+                return self.finish_research(item,state,save) if state['status']=='RESEARCH_READY' else state
             if gain < RESEARCH_GAIN_FLOOR:
                 research_record = record_research_candidate(
-                    snapshot, item, candidate, estimate, gain, admission=False)
-                save('RESEARCH_PAUSED', reason='单案明显退化，暂停自动邻域并等待研究判断',
+                    snapshot, item, candidate, estimate, gain, admission=False,
+                    outcome=outcome, family_pilot_approved=pilot)
+                save('RESEARCH_READY' if pilot and gain > -0.25 else 'RESEARCH_PAUSED',
+                     reason='单案明显退化，有限代表点继续检验' if pilot and gain > -0.25 else
+                            '单案明显退化，暂停自动邻域并等待研究判断', outcome=outcome,
                      case_gain=gain, research_record=research_record,
                      timing={'cycles': timing['cycles'],
                              'peak_window_power_w': timing['peak_window_power_w'],
                              'hbm_read_bytes': timing.get('hbm_read_bytes'),
                              'hbm_write_bytes': timing.get('hbm_write_bytes')})
-                return state
+                return self.finish_research(item,state,save) if state['status']=='RESEARCH_READY' else state
             if gain < self.min_case_gain:
-                research_record = record_research_candidate(snapshot, item, candidate, estimate, gain)
+                research_record = record_research_candidate(snapshot, item, candidate, estimate, gain,
+                    outcome=outcome, family_pilot_approved=pilot)
                 save('RESEARCH_READY', case_gain=gain, research_record=research_record,
                      session_id=session_id,
                      timing={'cycles': timing['cycles'],
                              'peak_window_power_w': timing['peak_window_power_w']})
                 return self.finish_research(item, state, save)
             if os.environ.get('CODESIGN_STRUCTURE_WORKER') == '1' and origin_root() == ROOT:
-                research_record = record_research_candidate(snapshot, item, candidate, estimate, gain)
+                research_record = record_research_candidate(snapshot, item, candidate, estimate, gain,
+                    outcome=outcome, family_pilot_approved=pilot)
                 save('RESEARCH_READY', case_gain=gain, research_record=research_record,
                      session_id=session_id,
                      timing={'cycles': timing['cycles'],

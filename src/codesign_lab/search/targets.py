@@ -116,6 +116,7 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
             implementation = False
             if source.is_relative_to(ROOT / 'workspace/implementation-loop'):
                 implementation = source.name == 'source' and (base.get('research_admission') is True or
+                    base.get('family_pilot_approved') is True or
                     base.get('audited') is True and base.get('eligible') is True)
             if not (family or implementation) or not (source / 'src').is_dir():
                 raise ValueError('历史记录来源不是可用的冻结实现族')

@@ -2,6 +2,23 @@
 from ..config import ROOT,load,resolve_reference,digest,bootstrap
 
 
+def matching_trace(record, case):
+    """只复用逐字节匹配硬件和目标程序的既有诊断。"""
+    evidence = record.get('profile_evidence', {}).get(case, {})
+    if not evidence.get('path') or not evidence.get('sha256'):
+        return None
+    path = resolve_reference(evidence['path'])
+    if not path.is_file() or digest(path) != evidence['sha256']:
+        return None
+    candidate, report = inputs(record, case)
+    trace = load(path)
+    expected = {'hardware': digest(candidate / 'hardware.json'),
+                'program': digest(candidate / 'programs' / f'{case}.asm')}
+    if trace.get('input_sha256') != expected or trace.get('complete_timing_identical') is not True:
+        return None
+    return path
+
+
 def inputs(record,case):
     if case not in {'M1_P1','M2_D1'}:raise ValueError('profile 案例无效')
     if not record.get('report') or not record.get('config'):

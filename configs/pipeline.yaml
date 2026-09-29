@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "out": "workspace/pipeline/score-v5-20260929-01",
+  "out": "workspace/pipeline/score-v6-20260929-01",
   "search_configs": [],
   "hypotheses": "configs/research-hypotheses.yaml",
   "watch": [],
