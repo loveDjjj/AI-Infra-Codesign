@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "out": "workspace/pipeline/continuous-v4d-20260929-01",
+  "out": "workspace/pipeline/score-v5-20260929-01",
   "search_configs": [],
   "hypotheses": "configs/research-hypotheses.yaml",
   "watch": [],
@@ -8,7 +8,7 @@
   "stop_on_exhaustion": true,
   "auto_audit": true,
   "scheduler": {
-    "workers": 32,
+    "workers": 48,
     "full_slots": 2,
     "memory_fraction": 0.7,
     "timeout_seconds": 3600,
@@ -17,8 +17,8 @@
   },
   "budget": {
     "wall_seconds": 21600,
-    "max_proposals": 80,
-    "case_calls": 100,
+    "max_proposals": 128,
+    "case_calls": 160,
     "full_calls": 12,
     "ai_calls": 24,
     "profile_calls": 4
@@ -37,7 +37,7 @@
   "triggers": {
     "batch_size": 8,
     "cooldown_seconds": 120,
-    "low_watermark": 10,
+    "low_watermark": 16,
     "stagnation_trials": 12,
     "improvement_threshold": 0.002,
     "failure_window": 6,
@@ -47,7 +47,7 @@
     "enabled": true,
     "model": "gpt-6-astra",
     "reasoning_effort": "medium",
-    "max_proposals": 3,
+    "max_proposals": 4,
     "coders": 4,
     "validators": 4,
     "official": 1,

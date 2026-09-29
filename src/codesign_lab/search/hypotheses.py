@@ -29,7 +29,7 @@ def load_pool(path):
         if not isinstance(identity,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',identity) or identity in seen:
             raise ValueError('结构机制 ID 无效或重复')
         seen.add(identity)
-        if not isinstance(item['lane'],str) or not item['lane'].startswith(('p1','d1')) or \
+        if not isinstance(item['lane'],str) or not (item['lane'].startswith(('p1','d1')) or item['lane']=='hardware') or \
                 not isinstance(item['proposal'],str) or not 40 <= len(item['proposal']) <= 4000:
             raise ValueError('结构假设缺少受影响案例或可否证说明')
         evidence=item['evidence_ids']

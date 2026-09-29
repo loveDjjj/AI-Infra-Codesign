@@ -22,6 +22,15 @@ from .scheduler import atomic_json, terminate
 from .targets import epoch
 
 CASES = {'p1': 'M1_P1', 'd1': 'M2_D1'}
+
+
+def proposal_case(lane):
+    if lane == 'hardware':
+        return 'both'
+    for prefix, case in CASES.items():
+        if lane.startswith(prefix):
+            return case
+    raise ValueError('未知结构研究方向')
 ARTIFACTS = ('hardware.json', 'programs/M1_P1.asm', 'programs/M2_D1.asm')
 TERMINAL = {'REJECTED', 'FAILED', 'LAUNCHED', 'AUDITED_NO_PROMOTION', 'BUDGET_EXHAUSTED',
             'TARGET_QUEUED', 'TARGET_INJECTED', 'RESEARCH_PAUSED'}
@@ -38,7 +47,7 @@ def proposals(campaign: Path):
     seen = set()
     for proposal in state.get('hypotheses', []):
         lane = proposal['lane']
-        case = CASES['p1' if lane.startswith('p1') else 'd1']
+        case = proposal_case(lane)
         transformation = proposal['transformation_id']
         seen.add((source, case, transformation))
         identifier = hashlib.sha256((source + ':seed:' + transformation).encode()).hexdigest()[:20]
@@ -55,9 +64,9 @@ def proposals(campaign: Path):
             continue
         for index, proposal in enumerate(decision['decision'].get('implementation_proposals', [])):
             lane = proposal.get('lane', '')
-            if not (lane.startswith('p1') or lane.startswith('d1')):
+            if not (lane.startswith('p1') or lane.startswith('d1') or lane == 'hardware'):
                 continue
-            case = CASES['p1' if lane.startswith('p1') else 'd1']
+            case = proposal_case(lane)
             # 明确的 transformation_id 优先；旧决策退化为规范化后的原文精确去重。
             # 不用模糊相似度丢弃不同假设。
             transformation = proposal.get('transformation_id') or ' '.join(proposal['proposal'].split())
@@ -586,6 +595,12 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
                         for case, info in record.get('cases', {}).items()}})
             elif identifier in item.get('evidence_snapshot', {}):
                 evidence.append(item['evidence_snapshot'][identifier])
+        joint = item['case'] == 'both'
+        config_rule = ('硬件—软件联合任务可修改 hardware 和两案中必要的配置字段，必须同时适配两份程序；'
+                       '先用官方硬件菜单及面积公式做静态筛选，不能只改 hardware.json 后让旧程序失败。'
+                       '默认关闭的新代码必须逐字节再生原三产物。'
+                       if joint else
+                       '必须逐字复制 workspace/implementation-baseline.json 再只新增本机制开关，')
         prompt = (
             '你正在实现独立源码 epoch 的一个结构实验。仅可修改本副本的 '
             'src/codesign_lab/codegen 下 Python 文件，必要时新增 tests/test_implementation_*.py。'
@@ -594,7 +609,7 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
             '同一机制必要的分片、RF布局和归并调整可以协同实现；不要混入无关优化。'
             '必须保留原算法作为默认行为，通过有默认值的配置开关启用新实现。'
             '请将完整候选设计 JSON 写到 workspace/implementation-input/config.json；'
-            '必须逐字复制 workspace/implementation-baseline.json 再只新增本机制开关，'
+            + config_rule +
             '不要从 configs/best.yaml 或其他历史配置复制。编码阶段不得运行 lab run、'
             '评估器、模拟器，亦不得修改 data/experiments.jsonl 或任何冻结报告；'
             '这些由统一 worker 在代码交付后执行。若静态资源账已否证机制，'
@@ -607,6 +622,8 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
             'schema_version=1、family_id、mechanism_id、case、operator、'
             'base_record_id="pending"、registered_source_sha256="pending"、'
             'variables(完整配置路径到有限合法值列表)、seed_variants(1至6个完整参数元组)、'
+            'candidate_budget(种子后最多再测到的总点数，至多32)、sampler(random或enumerate)、'
+            'expansion_gain(相对当前合格最佳的最低扩展收益，建议0.002)、'
             'critical_checks(列表)、stop_if(明确停止条件)。种子必须相对候选配置不同且由代码真实支持；'
             '没有有效族内变量时不必伪造清单，控制器将只保存单案结果。完成后说明改动。\n'
             '受影响案例：' + item['case'] + '\n机制 ID：' +
@@ -699,8 +716,11 @@ def family_target(snapshot: Path, item: dict, record_id: str, source_epoch: str)
     return {'schema_version': 1, 'target_id': 'family-' + item['id'],
         'lane': item['lane'], 'hypothesis': item.get('proposal', '验证实现族合法种子')[:4000],
         'base_record': record_id, 'source_epoch': source_epoch,
-        'cases': [item['case']], 'variables': manifest['variables'],
-        'sampler': 'enumerate', 'max_trials': len(values), 'max_inflight': len(values),
+        'cases': ['M1_P1', 'M2_D1'] if item['case'] == 'both' else [item['case']],
+        'variables': manifest['variables'],
+        'sampler': manifest.get('sampler', 'enumerate'),
+        'max_trials': manifest.get('candidate_budget', len(values)),
+        'max_inflight': min(4, manifest.get('candidate_budget', len(values))),
         'priority': .8, 'evidence_ids': [record_id],
         'family_manifest': 'workspace/implementation-input/capabilities.json',
         'variants': values}
@@ -786,17 +806,20 @@ def record_research_candidate(snapshot: Path, item: dict, candidate: Path, estim
     import datetime
     identifier = 'research-' + item['id']
     data = load(estimate)
-    info = data['cases'][item['case']]
-    if info.get('functional_passed') is not True or 'timing' not in info or \
-            data.get('hardware') != load(candidate / 'hardware.json') or \
-            data.get('program_sha256', {}).get(item['case']) != digest(
-                candidate / 'programs' / (item['case'] + '.asm')):
-        raise ValueError('研究报告与正确性或程序产物身份不匹配')
+    cases = ('M1_P1', 'M2_D1') if item['case'] == 'both' else (item['case'],)
+    if data.get('hardware') != load(candidate / 'hardware.json'):
+        raise ValueError('研究报告与硬件产物身份不匹配')
+    for case in cases:
+        info = data.get('cases', {}).get(case, {})
+        if info.get('functional_passed') is not True or 'timing' not in info or \
+                data.get('program_sha256', {}).get(case) != digest(
+                    candidate / 'programs' / (case + '.asm')):
+            raise ValueError('研究报告与正确性或程序产物身份不匹配')
     if not candidate.is_relative_to(snapshot) or not estimate.is_relative_to(snapshot):
         raise ValueError('研究证据必须属于隔离源码目录')
     record = {'id': identifier, 'campaign': 'implementation-' + item['id'],
               'scope': 'both', 'config': load(candidate / 'config.json'),
-              'cases': compact_cases({item['case']: info}),
+              'cases': compact_cases({case: data['cases'][case] for case in cases}),
               'report': str(estimate.relative_to(snapshot)),
               'candidate': str(candidate.relative_to(snapshot)),
               'artifact_sha256': artifacts(candidate), 'case_gain': gain,
@@ -1063,9 +1086,11 @@ class ImplementationLoop:
             return state
         parent_id = state.get('baseline_id') if state['status'] == 'CODED' else item.get('parent_record')
         baseline = next((row for row in read() if row['id'] == parent_id), None) \
-            if parent_id else best_record(item['case'])
+            if parent_id else best_record(None if item['case'] == 'both' else item['case'])
         if baseline is None:
             raise ValueError('指定的结构父版记录不可取回')
+        if item['case'] == 'both' and baseline.get('reproduction') not in {'verified', 'epoch_verified'}:
+            raise ValueError('硬件联合结构必须从单一可再生源码的已审计整案出发')
         if baseline.get('id', '').startswith('research-'):
             research_parent(baseline, item['case'])
         snapshot = state_path.parent / 'source'
@@ -1133,15 +1158,24 @@ class ImplementationLoop:
             if not config_path.is_file():
                 raise ValueError('AI 未生成候选 config.json')
             config = load(config_path)
-            if config.get('hardware') != baseline['config'].get('hardware'):
-                raise ValueError('本阶段结构实验不得改变硬件')
-            unaffected = 'M2_D1' if item['case'] == 'M1_P1' else 'M1_P1'
-            if config['programs'][unaffected] != baseline['config']['programs'][unaffected]:
-                raise ValueError('候选同时改变了非目标案例')
-            original_target = baseline['config']['programs'][item['case']]
-            if not preserved_fields(original_target, config['programs'][item['case']]) or \
-                    original_target == config['programs'][item['case']]:
-                raise ValueError('目标配置必须仅新增结构开关，保留既有参数')
+            joint = item['case'] == 'both'
+            if joint:
+                from .prune import reject
+                reason = reject(config)
+                if reason:
+                    raise ValueError('联合硬件配置不合法：' + reason)
+                if config == baseline['config']:
+                    raise ValueError('联合任务候选与基线完全相同')
+            else:
+                if config.get('hardware') != baseline['config'].get('hardware'):
+                    raise ValueError('本阶段结构实验不得改变硬件')
+                unaffected = 'M2_D1' if item['case'] == 'M1_P1' else 'M1_P1'
+                if config['programs'][unaffected] != baseline['config']['programs'][unaffected]:
+                    raise ValueError('候选同时改变了非目标案例')
+                original_target = baseline['config']['programs'][item['case']]
+                if not preserved_fields(original_target, config['programs'][item['case']]) or \
+                        original_target == config['programs'][item['case']]:
+                    raise ValueError('目标配置必须仅新增结构开关，保留既有参数')
             save('VALIDATING', changed_files=changed)
             default_off = snapshot / 'workspace/implementation-builds/default-off'
             if all((default_off / name).is_file() for name in ARTIFACTS):
@@ -1156,27 +1190,54 @@ class ImplementationLoop:
             run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'build', str(config_path),
                 '--out', str(candidate)], 'candidate-build', timeout=300)
             before, after = artifacts(baseline_build), artifacts(candidate)
-            if after['hardware.json'] != before['hardware.json'] or \
-                    after['programs/' + unaffected + '.asm'] != before['programs/' + unaffected + '.asm']:
-                raise ValueError('候选改变硬件或非目标 ASM')
-            if after['programs/' + item['case'] + '.asm'] == before['programs/' + item['case'] + '.asm']:
-                raise ValueError('结构开关没有改变目标 ASM')
+            if joint:
+                if after == before:
+                    raise ValueError('联合任务没有改变硬件或程序产物')
+            else:
+                if after['hardware.json'] != before['hardware.json'] or \
+                        after['programs/' + unaffected + '.asm'] != before['programs/' + unaffected + '.asm']:
+                    raise ValueError('候选改变硬件或非目标 ASM')
+                if after['programs/' + item['case'] + '.asm'] == before['programs/' + item['case'] + '.asm']:
+                    raise ValueError('结构开关没有改变目标 ASM')
             save('FUNCTIONAL', artifact_sha256=after, case_attempted=True)
             functional = snapshot / 'workspace/implementation-reports/functional.json'
             run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'run', str(candidate), '--level',
-                'functional', '--case', item['case'], '--seed', '7', '--seed', '123', '--out', str(functional)],
+                'functional'] + ([] if joint else ['--case', item['case']]) +
+                ['--seed', '7', '--seed', '123', '--out', str(functional)],
                 'functional', timeout=3600)
-            info = load(functional)['cases'][item['case']]
-            if info.get('functional_passed') is not True:
+            checked_cases = ('M1_P1', 'M2_D1') if joint else (item['case'],)
+            if any(load(functional)['cases'][case].get('functional_passed') is not True
+                   for case in checked_cases):
                 raise ValueError('功能检查没有通过')
             save('ESTIMATING')
             estimate = snapshot / 'workspace/implementation-reports/estimate.json'
             cache = Path(os.environ.get('CODESIGN_EVAL_CACHE_ROOT',
                                         str(origin_root() / 'workspace/search/cache'))).resolve()
             run(snapshot, [interpreter(), '-m', 'codesign_lab.evaluation.runner', str(candidate),
-                '--mode', 'estimate', '--case', item['case'], '--functional-report', str(functional),
+                '--mode', 'estimate'] + ([] if joint else ['--case', item['case']]) +
+                ['--functional-report', str(functional),
                 '--seed', '7', '--seed', '123', '--cache-dir', str(cache), '--out', str(estimate)],
                 'estimate', timeout=3600)
+            if joint:
+                measured=load(estimate)['cases']
+                original=load(snapshot / 'data/releases' / source_release / 'local-grade.json')['cases']
+                if any(measured[case]['timing']['peak_window_power_w'] > 20
+                       for case in checked_cases):
+                    record_id=record_research_candidate(snapshot,item,candidate,estimate,0,admission=False)
+                    save('REJECTED',reason='联合任务单案峰值功耗超限',research_record=record_id)
+                    return state
+                product=lambda rows: rows['M1_P1']['timing']['cycles']*rows['M2_D1']['timing']['cycles']
+                gain=1-product(measured)/product(original)
+                summary={case:{'cycles':measured[case]['timing']['cycles'],
+                    'peak_window_power_w':measured[case]['timing']['peak_window_power_w']}
+                    for case in checked_cases}
+                record_id=record_research_candidate(snapshot,item,candidate,estimate,gain,
+                    admission=gain>=RESEARCH_GAIN_FLOOR)
+                save('RESEARCH_READY' if gain>=RESEARCH_GAIN_FLOOR else 'RESEARCH_PAUSED',
+                     case_gain=gain,research_record=record_id,session_id=session_id,
+                     timing={'cases':summary},
+                     reason='周期乘积明显退化' if gain<RESEARCH_GAIN_FLOOR else None)
+                return self.finish_research(item,state,save) if gain>=RESEARCH_GAIN_FLOOR else state
             timing = load(estimate)['cases'][item['case']]['timing']
             baseline_timing = load(snapshot / 'data/releases' / source_release / 'local-grade.json')['cases'][item['case']]['timing']
             gain = (baseline_timing['cycles'] - timing['cycles']) / baseline_timing['cycles']

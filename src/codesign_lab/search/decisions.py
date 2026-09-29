@@ -112,6 +112,8 @@ def apply_decision(pool,triggers,decision):
         if isinstance(item.get('parent_record'), str) and item['parent_record'].startswith('research-'):
             from .implementation import research_parent
             parent = next(row for row in records if row['id'] == item['parent_record'])
+            if item['lane'] == 'hardware':
+                raise ValueError('硬件联合结构必须从已审计整案出发')
             research_parent(parent, 'M1_P1' if item['lane'].startswith('p1') else 'M2_D1')
     for item in decision['profile_requests']:
         if item['record_id'] not in valid_ids:raise ValueError('profile 引用不存在的记录')

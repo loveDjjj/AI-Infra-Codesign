@@ -37,7 +37,7 @@ class Triggers:
             identity = (row['hardware_hash'], row['case'])
             group = groups.setdefault(identity, [])
             best_before = bests.get(identity, cycles)
-            if row['id'] in fresh and (best_before - cycles) / best_before >= self.improvement_threshold:
+            if row['id'] in fresh and (best_before - cycles) / best_before >= max(self.improvement_threshold, .01):
                 reasons.add('improvement')
             group.append((row, best_before))
             bests[identity] = min(best_before, cycles)
@@ -110,11 +110,13 @@ class Triggers:
                     revisions[identifier] = target_rev
             completed = sorted(revisions)
             reasons = self.trends(entry['observations'], new)
-            # 每份新评估证据立即交给同一 lane 的分析会话；并发完成的结果合并成一次快照。
-            result_ready = any(item.get('observation_kind') in {'case_result', 'official_result'} for item in new)
+            # 普通单案点进入批量事实；正式结果与显著结构信号可立即规划。
+            result_ready = any(item.get('observation_kind') == 'official_result' for item in new)
             if result_ready:
                 reasons.append('result_ready')
-            if any(item.get('observation_kind') == 'implementation' for item in new):
+            if any(item.get('observation_kind') == 'implementation' and
+                   isinstance(item.get('case_gain'), (int, float)) and
+                   item['case_gain'] >= .01 for item in new):
                 reasons.append('implementation_result')
                 result_ready = True
             if any(entry['profiles'][identifier].get('status') in {'FAILED','REJECTED'} for identifier in profiles):reasons.append('profile_failed')
@@ -123,7 +125,7 @@ class Triggers:
                 reasons.append('target_completion')
             if len(new) >= self.batch_size:
                 reasons.append('batch')
-            if new and queued_tasks < self.low_watermark:
+            if not self.global_only and new and queued_tasks < self.low_watermark:
                 reasons.append('low_watermark')
             failures = [o for o in new[-self.failure_window:] if o.get('functional_passed') is False]
             if len(failures) >= self.failure_threshold:

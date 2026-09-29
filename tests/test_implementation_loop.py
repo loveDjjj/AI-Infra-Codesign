@@ -15,6 +15,72 @@ from codesign_lab.config import ROOT
 
 
 class ImplementationChecks(unittest.TestCase):
+    def test_joint_hardware_validation_checks_both_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/current'
+            campaign.mkdir(parents=True)
+            (campaign / 'state.json').write_text(json.dumps({'analysis': {'lanes': {
+                'global': {'session_id': str(uuid.uuid4())}}}}))
+            source = root / 'workspace/implementation-loop/current/joint/source'
+            (source / 'workspace/implementation-input').mkdir(parents=True)
+            base = {'hardware': {'sm_count': 16},
+                    'programs': {'M1_P1': {'config': {}}, 'M2_D1': {'config': {}}}}
+            changed = {'hardware': {'sm_count': 24}, 'programs': base['programs']}
+            (source / 'workspace/implementation-input/config.json').write_text(json.dumps(changed))
+            release = source / 'data/releases/base/local-grade.json'
+            release.parent.mkdir(parents=True)
+            release.write_text(json.dumps({'cases': {
+                'M1_P1': {'timing': {'cycles': 1000}},
+                'M2_D1': {'timing': {'cycles': 100}}}}))
+            for folder in ('baseline', 'default-off'):
+                for name in module.ARTIFACTS:
+                    path = source / 'workspace/implementation-builds' / folder / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('baseline')
+            state_path = source.parent / 'state.json'
+            proposal = {'id': 'joint', 'case': 'both', 'decision_id': 'decision'}
+            state_path.write_text(json.dumps({'status': 'CODED', 'snapshot': str(source),
+                'baseline_id': 'base', 'proposal': proposal}))
+            baseline = {'id': 'base', 'candidate': 'data/releases/base',
+                'reproduction': 'verified', 'config': base}
+            commands = {}
+            def run(_source, argv, label, **_kwargs):
+                commands[label] = argv
+                if label == 'functional':
+                    output = source / 'workspace/implementation-reports/functional.json'
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_text(json.dumps({'cases': {
+                        case: {'functional_passed': True} for case in ('M1_P1', 'M2_D1')}}))
+                if label == 'estimate':
+                    output = source / 'workspace/implementation-reports/estimate.json'
+                    output.write_text(json.dumps({'cases': {
+                        'M1_P1': {'timing': {'cycles': 900, 'peak_window_power_w': 19}},
+                        'M2_D1': {'timing': {'cycles': 95, 'peak_window_power_w': 18}}}}))
+            def artifacts(path):
+                return {'hardware.json': 'new' if path.name == 'candidate' else 'old',
+                        'programs/M1_P1.asm': 'p1', 'programs/M2_D1.asm': 'd1'}
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'campaign_generator_unchanged', return_value=True), \
+                 patch.object(module, 'verify_official'), \
+                 patch.object(module, 'verify_snapshot_official'), \
+                 patch.object(module, 'validate_diff', return_value=['codegen.py']), \
+                 patch('codesign_lab.search.prune.reject', return_value=None), \
+                 patch.object(module, 'read', return_value=[baseline]), \
+                 patch.object(module, 'artifacts', side_effect=artifacts), \
+                 patch.object(module, 'interpreter', return_value='/test/python'), \
+                 patch.object(module, 'run', side_effect=run), \
+                 patch.object(module, 'run_regression'), \
+                 patch.object(module, 'record_research_candidate', return_value='research-joint'), \
+                 patch.object(module.ImplementationLoop, 'finish_research') as seed:
+                seed.side_effect = lambda item, state, save: state
+                result = module.ImplementationLoop(campaign).process(proposal, phase='validate')
+            self.assertEqual(result['status'], 'RESEARCH_READY', result.get('error'))
+            self.assertAlmostEqual(result['case_gain'], .145)
+            self.assertNotIn('--case', commands['functional'])
+            self.assertNotIn('--case', commands['estimate'])
+            seed.assert_called_once()
+
     def test_best_record_includes_reproducible_epoch_release(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

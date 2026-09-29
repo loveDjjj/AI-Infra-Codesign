@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from codesign_lab.search.families import configurations, validate_manifest
+from codesign_lab.search.families import configurations, validate_manifest, expansion_signal
 from codesign_lab.search.supply import review
 from codesign_lab.search.triggers import Triggers
 
@@ -49,6 +49,31 @@ class FamilySupplyChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '冻结源码'):
             validate_manifest(self.manifest, base_config=self.base, source_sha256='other',
                 case='M1_P1', base_record_id='research-w2')
+
+    def test_seed_budget_and_joint_hardware_domain(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest['candidate_budget'] = 3
+        manifest['sampler'] = 'random'
+        validate_manifest(manifest, base_config=self.base, source_sha256='source-hash',
+            case='M1_P1', base_record_id='research-w2')
+        manifest['candidate_budget'] = 4
+        with self.assertRaisesRegex(ValueError, '候选预算'):
+            validate_manifest(manifest, base_config=self.base, source_sha256='source-hash',
+                case='M1_P1', base_record_id='research-w2')
+        joint = copy.deepcopy(self.manifest)
+        joint['case'] = 'both'
+        joint['variables'] = {'hardware.sm_count': [16, 24],
+                              'programs.M2_D1.config.cold_group': [4, 8]}
+        joint['seed_variants'] = [{'hardware.sm_count': 24,
+                                  'programs.M2_D1.config.cold_group': 4}]
+        validate_manifest(joint, base_config=self.base, source_sha256='source-hash',
+            case='both', base_record_id='research-w2')
+
+    def test_pilot_expands_only_with_useful_cycles(self):
+        self.assertTrue(expansion_signal(base_cycles=400000, global_cycles=390000,
+            pilot_cycles=[388000], threshold=.002))
+        self.assertFalse(expansion_signal(base_cycles=400000, global_cycles=390000,
+            pilot_cycles=[399000], threshold=.002))
 
     def test_supply_without_new_observation_is_idempotent_and_backed_off(self):
         state = {'targets': {}, 'applied_decisions': {}, 'analysis': {'lanes': {}}}

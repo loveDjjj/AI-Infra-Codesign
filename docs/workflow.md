@@ -14,7 +14,7 @@
 
 功能检查、单案时序、预测组合、完整官方评分和审计分别入账。只有合格且已审计的完整整案可更新最高分事实。`--resume` 不增加预算；源码变化必须新开批次。搜索器做合法性检查、产物去重、精确缓存和受控并发；同硬件 P1/D1 才可组合，完整官方评分仍独立执行。AI 决策通过结构化目标进入队列，不能直接改账本或正在运行的生成器。
 
-当前最高已审计整案为 `pair-w2-throttle-highest-full-1790611520350037544`，49,420.082119 分，属于跨源码组合。根目录 `best.yaml` 仍是 joint28，47,957.06 分；网站未提交。跨源码组合从各自受保护源码再生，不能用单份当前生成器重建。单一生成器的受保护 release 才使用 `lab family-restore` 恢复实现族。
+当前最高已审计结果、可提交 ZIP 和实时任务从看板读取。`data/submissions/best-local.json` 是本地冠军包指针；只有独立解包再生验证成功才会更新。跨源码组合从两案各自受保护的来源再生，不能用根目录单份生成器重建。单一生成器的受保护 release 可用 `lab family-restore` 恢复实现族。
 
 ## 实时看板与轻资产整理
 
@@ -38,6 +38,6 @@
 .venv/bin/python scripts/submit.py workspace/reports/release.zip --submit # 实际上传
 ```
 
-课程包必须包含 ZIP 根目录的 `local-grade.json`、`hardware.json`、两份 ASM，以及 `project/iteration-log.md` 与完整代理轨迹。`package` 和 `verify` 不上传网站。网站上传受至少提高 1000 分、间隔至少 10 分钟的脚本规则约束；回执只保存在本机 `data/submissions/`。GitHub 推送与课程网站提交是两件事。
+课程包必须包含 ZIP 根目录的 `local-grade.json`、`hardware.json`、两份 ASM，以及 `project/iteration-log.md` 与完整代理轨迹。流水线在官方整案合格并审计后，自动打包更高分版本，逐份校验无损压缩的代理轨迹，并在干净目录再生三份产物。`package` 和 `verify` 不上传网站。网站上传受至少提高 1000 分、间隔至少 10 分钟的脚本规则约束；回执只保存在本机 `data/submissions/`。GitHub 推送与课程网站提交是两件事。
 
 源码、当前配置、核心文档、测试和轻量账本进入 Git；配置命名与保留规则见 [configs/README.md](../configs/README.md)。旧批次 YAML 不长期保留，历史结论从实验账本和决策账本读取。`data/agent-trace/`、`data/releases/`、提交 ZIP、官方起始包及工作区大原件不进入 Git。课程明确要求完整代理会话轨迹，因此轨迹虽不作为 AI 日常搜索输入，仍须在提交包中保留。独立规划、编码调用只把会话 ID 写入 `data/agent-trace/session-links.jsonl`，详细调用日志放在可清理的 `workspace/agent-calls/`；打包时按 ID 导出原生会话，清单也覆盖根会话树。克隆仓库后须另外恢复受保护材料才能复现最高分和打出课程 ZIP。资源忙碌比例只支持瓶颈假设，不能当成已证明的因果等待。

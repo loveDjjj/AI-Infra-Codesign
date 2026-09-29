@@ -64,8 +64,8 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
     family_target = 'family_manifest' in target or 'variants' in target
     if family_target and (set(target) & {'family_manifest', 'variants'}) != {'family_manifest', 'variants'}:
         raise ValueError('实现族目标必须同时提供能力清单和种子')
-    if family_target and target['sampler'] != 'enumerate':
-        raise ValueError('有限实现族种子只允许确定性枚举')
+    if family_target and target['sampler'] not in {'enumerate', 'random'}:
+        raise ValueError('实现族搜索只支持枚举或随机选点')
     if 'seed' in target and (type(target['seed']) is not int or not 0 <= target['seed'] < 2**64):
         raise ValueError('seed 必须为 0 到 2**64-1 的整数')
     if type(target['max_trials']) is not int or not 0 < target['max_trials'] <= max_trials:
@@ -141,9 +141,13 @@ def validate_target(target, source_epoch, records=None, max_trials=128):
             source_hash = base.get('source_sha256') or source_epoch
         from .families import load_manifest
         manifest=load_manifest(source,target['family_manifest'],base_config=base['config'],
-            source_sha256=source_hash,case=cases[0],base_record_id=base['id'])
-        if len(cases)!=1 or target['variables']!=manifest['variables'] or \
-                target['variants']!=manifest['seed_variants'] or target['max_trials']!=len(target['variants']):
+            source_sha256=source_hash,
+            case='both' if set(cases)=={'M1_P1','M2_D1'} else cases[0],
+            base_record_id=base['id'])
+        if target['variables']!=manifest['variables'] or \
+                target['variants']!=manifest['seed_variants'] or \
+                target['max_trials']!=manifest.get('candidate_budget', len(target['variants'])) or \
+                target['sampler']!=manifest.get('sampler', 'enumerate'):
             raise ValueError('目标与冻结实现族能力清单不一致')
     if 'prior_record_ids' in target:
         identifiers=target['prior_record_ids']

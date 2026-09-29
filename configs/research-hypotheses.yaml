@@ -25,6 +25,18 @@
         "research-415918028abfa7f93caf"
       ],
       "proposal": "研究 D1 QKV 到 attention 或 attention 到 WO 的一个反复发生的 head 布局边界，优先后七步热路径；只选真实 profile 中有可测交换或 scratch 读回成本的单一边界。先核对公共 K/V 输出、STEP.COMMIT 和输入释放约束，禁止提前读取未来 token。若边界开销无法量化或 RF/布局不合法，写 stop.json；否则实现默认关闭的有界 head 对齐模板，保持其他算子不变。交付能够改变真实 ASM 的1至3个合法参数种子，经 seed7/123 功能和单案时序验证，不以冷首步的微小收益代替热路径收益。"
+    },
+    {
+      "transformation_id": "hw-vector-rf-joint-v1",
+      "lane": "hardware",
+      "evidence_ids": ["official-1790652680584170255"],
+      "proposal": "联合研究 vector_lanes 16 与两案 RF 视图重排。以可再生的单源码已审计整案为基线，先由官方硬件菜单和面积公式筛掉非法资源，再检查 P1 的 LN/GELU/softmax 与 D1 热步骤中向量服务是否足以抵消 RF 单 lane 容量下降。必须同时适配 M1_P1 和 M2_D1，给出至少两个硬件—软件代表点和真正支持的有限参数域；默认关闭路径逐字节再生基线。若 RF 生命周期或静态面积否证，交付 stop.json。不得只把 vector_lanes 字段改大而沿用不合法旧布局。"
+    },
+    {
+      "transformation_id": "hw-sm-matrix-mapping-v1",
+      "lane": "hardware",
+      "evidence_ids": ["official-1790652680584170255"],
+      "proposal": "联合研究更多但较小 SM 与矩阵阵列、RF 端口配比，避免只扫硬件 JSON。先选择官方菜单中面积合格的 24SM 或 32SM 一种模板，并同步改两案 workgroup 映射、权重分配和必要归并。用静态资源账明确哪些算子有并行收益、哪些 NoC 与 RF 服务会增加，再给出少量可构建的完整硬件—软件种子及受约束搜索域。默认关闭时逐字节再生单源码已审计基线；若旧代码写死 16SM 无法可靠适配，要明确停止原因而非把非法构建当成硬件失败。"
     }
   ]
 }

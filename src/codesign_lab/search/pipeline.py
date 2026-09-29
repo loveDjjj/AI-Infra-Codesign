@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
+from itertools import chain
 
 from ..config import ROOT
 from codesign_lab.config import load, digest, verify_official, reference, bootstrap
@@ -401,6 +402,7 @@ class Pipeline:
         self.completed(job, result)
 
     def prepare(self):
+        self.queue_champion()
         sources = [(ROOT, path) for path in self.args.config]
         sources += [(Path(source).resolve(), Path(path).resolve())
                     for source, path in getattr(self.args, 'family_config', [])]
@@ -425,6 +427,25 @@ class Pipeline:
                     prior['cases'] = sorted(set(prior['cases'] + job['cases']))
                 else:
                     self.enqueue(job)
+
+    def queue_champion(self):
+        """恢复时也补齐已审计冠军的可提交 ZIP。"""
+        from ..release import champion_state
+        rows = [row for row in read() if row.get('scope') == 'full' and
+                row.get('eligible') is True and row.get('audited') is True and
+                row.get('reproduction') in {'verified', 'verified_composite'} and
+                isinstance(row.get('score'), (int, float))]
+        if not rows:
+            return
+        best = max(rows, key=lambda row: row['score'])
+        current = champion_state()
+        if current and current.get('score', float('-inf')) >= best['score'] and \
+                Path(current.get('archive', '')).is_file():
+            return
+        self.enqueue({'key': 'package-' + best['id'], 'stage': 'package',
+            'record_id': best['id'], 'priority': best['score'],
+            'memory_bytes': 1024**3,
+            'command': [self.python, '-m', 'codesign_lab.evaluation.champion', best['id']]})
 
     def process_targets(self):
         """运行期间接收新目标；完成构建即可按真实产物释放评估。"""
@@ -468,7 +489,14 @@ class Pipeline:
                 entry['proposal_exhausted'] = False
                 if definition.get('family_manifest'):
                     from .families import configurations
-                    proposed = configurations(base, definition['variants'])
+                    seeds = configurations(base, definition['variants'])
+                    if entry.get('family_phase') == 'expand':
+                        extension = generate(base, definition['variables'],
+                            min(self.pool.max_proposals, definition['max_trials'] * 4),
+                            sampler=definition['sampler'], seed=target_seed(definition))
+                        proposed = chain(seeds, extension)
+                    else:
+                        proposed = seeds
                 else:
                     proposed = generate(base, definition['variables'], self.pool.max_proposals,
                         sampler=definition.get('sampler', 'enumerate'),
@@ -542,6 +570,61 @@ class Pipeline:
                         candidate_state['status'] = ('DUPLICATE' if candidate_state.get('duplicate') else 'OBSERVED') if all(load(path)['status'] == 'completed' for path in paths) else 'EVALUATION_FAILED'
             terminal = {'STATIC_REJECTED', 'BUILD_FAILED', 'DUPLICATE', 'OBSERVED', 'EVALUATION_FAILED', 'CANCELLED'}
             entry['trials_completed'] = sum(c['status'] in terminal for c in entry.get('candidates', {}).values())
+            if definition.get('family_manifest') and not entry.get('family_phase') and \
+                    definition['max_trials'] > len(definition['variants']):
+                from .families import configurations, expansion_signal, load_manifest
+                seed_keys = [self.design_key(config, source_root) for _, config in
+                             configurations(entry['base_config'], definition['variants'])]
+                if all(entry.get('candidates', {}).get(identity, {}).get('status') in terminal
+                       for identity in seed_keys):
+                    rows = read()
+                    joint = set(definition['cases']) == {'M1_P1', 'M2_D1'}
+                    case = 'both' if joint else definition['cases'][0]
+                    base_row = next((row for row in rows if row['id'] == definition['base_record']), {})
+                    def metric(row):
+                        infos = row.get('cases', {})
+                        selected = ('M1_P1', 'M2_D1') if joint else (case,)
+                        if any(infos.get(name, {}).get('functional_passed') is not True or
+                               type(infos[name].get('timing', {}).get('cycles')) is not int or
+                               infos[name]['timing'].get('peak_window_power_w', float('inf')) > 20
+                               for name in selected):
+                            return None
+                        value = 1
+                        for name in selected:
+                            value *= infos[name]['timing']['cycles']
+                        return value
+                    base_cycles = metric(base_row)
+                    hardware = entry['base_config']['hardware']
+                    compatible = [metric(row) for row in rows
+                        if row.get('scope') == 'full' and row.get('audited') is True and
+                        row.get('eligible') is True and
+                        (joint or row.get('config', {}).get('hardware') == hardware)]
+                    compatible = [value for value in compatible if value is not None]
+                    pilot_cycles = []
+                    for identity in seed_keys:
+                        candidate_path = str(self.out / 'builds' / identity)
+                        pilot = {'cases': {}}
+                        for row in rows:
+                            if row.get('campaign') != self.out.name or row.get('candidate') not in {
+                                    candidate_path, reference(Path(candidate_path))}:
+                                continue
+                            pilot['cases'].update(row.get('cases', {}))
+                        value = metric(pilot)
+                        if value is not None:
+                            pilot_cycles.append(value)
+                    manifest = load_manifest(source_root, definition['family_manifest'],
+                        base_config=entry['base_config'],
+                        source_sha256=definition.get('execution_sha256', self.pool.source_epoch),
+                        case=case, base_record_id=definition['base_record'])
+                    expand = expansion_signal(base_cycles=base_cycles,
+                        global_cycles=min(compatible) if compatible else None,
+                        pilot_cycles=pilot_cycles,
+                        threshold=manifest.get('expansion_gain', 0.002))
+                    entry['family_phase'] = 'expand' if expand else 'pilot_stopped'
+                    entry['pilot_result'] = {'base_cycles': base_cycles,
+                        'global_cycles': min(compatible) if compatible else None,
+                        'pilot_cycles': pilot_cycles, 'expanded': expand}
+                    entry['proposal_exhausted'] = not expand
             all_proposed = ('max_inflight' not in definition or entry.get('proposal_exhausted')
                 or sum(c['status'] != 'CANCELLED' for c in entry.get('candidates', {}).values()) >= definition['max_trials'])
             feedback_done = not adaptive or (not entry.get('adaptive', {}).get('pending_jobs') and all(
@@ -994,7 +1077,9 @@ class Pipeline:
             if job_key in self.seen:
                 continue
             self.enqueue({'key': job_key, 'stage': stage,
-                'proposal_id': identifier, 'priority': -1,
+                'proposal_id': identifier,
+                'mechanism_id': item.get('transformation_id', identifier),
+                'priority': -1,
                 'memory_bytes': (2 if phase == 'code' else 8) * 1024**3,
                 'timeout': 2400 if phase == 'code' else 10800 if phase == 'official' else 7200,
                 'command': [self.python, '-m', 'codesign_lab.search.implementation',
@@ -1042,12 +1127,9 @@ class Pipeline:
                           'WAITING_FOR_LAUNCH', 'AUDITED_NO_PROMOTION'} and record_id:
                 record = next((row for row in read() if row['id'] == record_id), None)
                 case = state.get('proposal', {}).get('case')
-                info = record.get('cases', {}).get(case, {}) if record else {}
-                timing = info.get('timing', {})
+                cases = ('M1_P1', 'M2_D1') if case == 'both' else (case,)
                 candidate_name = record.get('candidate') if record else None
-                if info.get('functional_passed') is True and isinstance(timing.get('cycles'), int) and \
-                        isinstance(timing.get('peak_window_power_w'), (int, float)) and \
-                        timing['peak_window_power_w'] <= 20 and isinstance(candidate_name, str):
+                if isinstance(candidate_name, str):
                     candidate_path = Path(candidate_name)
                     candidate_path = candidate_path if candidate_path.is_absolute() else ROOT / candidate_path
                     source_name = record.get('source_root')
@@ -1056,8 +1138,15 @@ class Pipeline:
                     if candidate_path.is_dir() and record.get('artifact_sha256') and \
                             all(digest(candidate_path / name) == expected
                                 for name, expected in record['artifact_sha256'].items()):
-                        self.observe(candidate_path, case, timing['cycles'],
-                            timing['peak_window_power_w'], source_root=source_root)
+                        for observed_case in cases:
+                            info = record.get('cases', {}).get(observed_case, {})
+                            timing = info.get('timing', {})
+                            if info.get('functional_passed') is True and \
+                                    isinstance(timing.get('cycles'), int) and \
+                                    isinstance(timing.get('peak_window_power_w'), (int, float)) and \
+                                    timing['peak_window_power_w'] <= 20:
+                                self.observe(candidate_path, observed_case, timing['cycles'],
+                                    timing['peak_window_power_w'], source_root=source_root)
                         self.shortlist()
             if ((job['stage'] == 'implementation_code' and status == 'CODED') or
                     (job['stage'] == 'implementation_validate' and status == 'OFFICIAL_QUEUED')) and \
@@ -1118,7 +1207,7 @@ class Pipeline:
                 error=result.get('error',result['status']),failed_stage=job['stage'])
             self.notify_profile(job['profile_id'])
             self.pool.save()
-        if result['status'] != 'completed' and job['stage'] not in {'case', 'functional', 'audit'}:
+        if result['status'] != 'completed' and job['stage'] not in {'case', 'functional', 'audit', 'package'}:
             return
         if job['stage'] == 'functional':
             self.complete_functional(job, result)
@@ -1239,6 +1328,7 @@ class Pipeline:
             record = next(r for r in read() if r['id'] == job['record_id'])
             if record.get('audited') and record.get('eligible'):
                 self.initial_score = max(self.initial_score, record['score'])
+                self.queue_champion()
             self.triggers.observe('global', {'id': 'official-' + record['id'],
                 'observation_kind': 'official_result', 'record_id': record['id'],
                 'eligible': record.get('eligible'), 'score': record.get('score'),
@@ -1247,6 +1337,12 @@ class Pipeline:
             self.pool.save()
             print(json.dumps({'event': 'official_audit_finished', 'record': record['id'],
                 'audited': record.get('audited'), 'report': record.get('report')}, ensure_ascii=False), flush=True)
+        elif job['stage'] == 'package':
+            from ..release import champion_state
+            current = champion_state()
+            print(json.dumps({'event': 'champion_package_finished', 'record': job['record_id'],
+                'status': result['status'], 'best_submittable': current,
+                'error': result.get('error')}, ensure_ascii=False), flush=True)
 
     def run(self):
         self.prepare()
@@ -1265,8 +1361,9 @@ class Pipeline:
                        for source, identity in self.family_sources.items()):
                     raise ValueError('冻结实现族源码在运行期间改变，停止流水线')
                 external = self.external()
-                if not expired or any(job['stage'] == 'audit' for job in self.pending):
-                    eligible_jobs = self.pending if not expired else [job for job in self.pending if job['stage'] == 'audit']
+                final_stages = {'audit', 'package'}
+                if not expired or any(job['stage'] in final_stages for job in self.pending):
+                    eligible_jobs = self.pending if not expired else [job for job in self.pending if job['stage'] in final_stages]
                     choices = select_jobs(eligible_jobs, [x['job'] for x in self.active.values()], external,
                         self.workers, self.args.full_slots, self.memory_budget,
                         int(resources()['available_memory_bytes'] * self.memory_fraction))
@@ -1276,7 +1373,7 @@ class Pipeline:
                         job['budget_key'] = job['key'] if attempt == 1 else job['key'] + '-attempt' + str(attempt)
                         budget_kind = ('case' if job['stage'] in {'functional', 'implementation_validate'} else
                                        'full' if job['stage'] == 'implementation_official' else job['stage'])
-                        if job['stage'] != 'audit' and not self.budget.reserve(job['budget_key'], budget_kind):
+                        if job['stage'] not in final_stages and not self.budget.reserve(job['budget_key'], budget_kind):
                             self.pending.remove(job)
                             result = {'key': job['key'], 'stage': job['stage'], 'status': 'budget_exhausted', 'wall_seconds': 0}
                             atomic_json(self.out / 'jobs' / (job['key'] + '.result.json'), result)
@@ -1335,7 +1432,7 @@ class Pipeline:
                         full_slots=self.args.full_slots, external=external, memory_budget=self.memory_budget,
                         available=current_available, expired=expired),
                     'attempt_costs': attempt_costs(self.pool.state),
-                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'report','profile_build','profile','implementation_code','implementation_validate','implementation_official']},
+                    'external_active': external, 'pending': {s: sum(x['stage'] == s for x in self.pending) for s in ['build', 'functional', 'case', 'sample', 'verify', 'full', 'audit', 'package', 'report','profile_build','profile','implementation_code','implementation_validate','implementation_official']},
                     'active': [{'key': k, 'stage': x['job']['stage'], 'pid': x['pid'],
                         'start_ticks': load(Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json'))['start_ticks'] if Path(self.pool.state['jobs'][k]['spec']).with_suffix('.lease.json').exists() else None,
                         'queue_wait_seconds': x['job'].get('queue_wait_seconds'),
@@ -1362,7 +1459,7 @@ class Pipeline:
                             'reason':'全局分析已确认该目标池版本，无可执行新目标；提前结束而非空转至预算截止',
                             'pool_revision':revision},ensure_ascii=False),flush=True)
                         break
-                if not self.active and not self.analyst.active and not any(job['stage'] == 'audit' for job in self.pending) and (expired or (not self.pending and not external and not target_work_pending and not getattr(self.args, 'stay_open', False))):
+                if not self.active and not self.analyst.active and not any(job['stage'] in {'audit', 'package'} for job in self.pending) and (expired or (not self.pending and not external and not target_work_pending and not getattr(self.args, 'stay_open', False))):
                     break
                 time.sleep(1)
         finally:

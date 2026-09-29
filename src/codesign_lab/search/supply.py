@@ -32,6 +32,17 @@ def review(state, *, pending, active, completed, budget, workers, source_epoch, 
     mechanisms = sorted({proposal.get('transformation_id') or proposal.get('proposal')
         for row in decisions.values() for proposal in row.get('decision', {}).get('implementation_proposals', [])})
     targets = state.get('targets', {})
+    active_mechanisms = {job.get('mechanism_id', job.get('proposal_id', job['key']))
+                         for job in family_jobs}
+    ever_launched = {entry.get('job', {}).get('mechanism_id')
+                     for entry in state.get('jobs', {}).values()
+                     if entry.get('job', {}).get('stage', '').startswith('implementation_')}
+    reserve_hypotheses = sum(item.get('transformation_id') not in ever_launched
+                             for item in state.get('hypotheses', []))
+    expandable = sum(max(0, entry['definition'].get('max_trials', 0) -
+                          entry.get('trials_launched', 0))
+                     for entry in targets.values() if entry.get('status') in {'QUEUED', 'ACTIVE'}
+                     and entry.get('family_phase') == 'expand')
     signature = hashlib.sha256(json.dumps({
         'source': source_epoch,
         'targets': [(key, entry.get('status'), entry.get('trials_completed')) for key, entry in sorted(targets.items())],
@@ -39,7 +50,10 @@ def review(state, *, pending, active, completed, budget, workers, source_epoch, 
         'observations': state.get('analysis', {}).get('lanes', {}).get('global', {}).get('seen', [])[-8:],
     }, sort_keys=True).encode()).hexdigest()
     if signature != supply.get('revision'):
-        supply.update(revision=signature, attempts=0, next_review_wall=0, blocked_reason=None,
+        supply.update(revision=signature, attempts=0,
+                      next_review_wall=max(supply.get('next_review_wall', 0),
+                                           supply.get('last_requested_wall', 0) + 300),
+                      blocked_reason=None,
                       last_request_id=None)
     request_id = supply.get('last_request_id')
     if request_id and request_id in decisions:
@@ -53,7 +67,9 @@ def review(state, *, pending, active, completed, budget, workers, source_epoch, 
                 if supply['attempts'] >= 2 else 'AI 未提出有证据的新目标；等待新事实或有限退避')
     remaining = budget.snapshot()
     supply.update(coverage_seconds=round(coverage, 1), ready_tasks=len(ready),
-                  active_family_tasks=len(family_jobs), mechanisms=len(mechanisms),
+                  active_family_tasks=len(family_jobs), active_mechanisms=len(active_mechanisms),
+                  expandable_candidates=expandable, reserved_hypotheses=reserve_hypotheses,
+                  mechanisms=len(mechanisms),
                   lead_seconds=lead_seconds)
     if remaining['remaining_wall_seconds'] <= 0 or remaining['used']['ai'] >= remaining['limits']['ai']:
         supply['blocked_reason'] = 'AI 或运行时间预算已用尽'
@@ -61,7 +77,8 @@ def review(state, *, pending, active, completed, budget, workers, source_epoch, 
     if remaining['used']['case'] >= remaining['limits']['case']:
         supply['blocked_reason'] = '单案评估预算已用尽'
         return None
-    if coverage >= lead_seconds or len(family_jobs) >= desired_families:
+    if coverage >= lead_seconds or (len(active_mechanisms) >= desired_families and
+                                    (expandable >= max(1, workers // 2) or reserve_hypotheses)):
         supply['blocked_reason'] = None
         return None
     if supply.get('last_request_id') or now < supply.get('next_review_wall', 0):
@@ -73,6 +90,7 @@ def review(state, *, pending, active, completed, budget, workers, source_epoch, 
     if lane.get('pending') or lane.get('running_decision') or lane.get('running_job'):
         return None
     supply['attempts'] += 1
+    supply['last_requested_wall'] = now
     identity = hashlib.sha256(json.dumps([signature, supply['attempts']], sort_keys=True).encode()).hexdigest()
     supply['last_request_id'] = identity
     supply['blocked_reason'] = '候选供给余量不足，等待研究规划'

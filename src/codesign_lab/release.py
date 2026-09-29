@@ -58,7 +58,7 @@ def promote(identifier):
     return current
 
 def package(identifier,output):
-    import hashlib,lzma,zipfile,tempfile
+    import hashlib,lzma,zipfile,tempfile,tarfile,io
     from pathlib import Path
     from .build import build
     from .traces import export,ROOT_THREAD
@@ -116,17 +116,25 @@ def package(identifier,output):
     add(audit_path,'project/selected-evidence/audit.json')
     files['project/build_candidate.py']=b"import sys,json,tempfile,argparse\nfrom pathlib import Path\nsys.path.insert(0,str(Path(__file__).resolve().parent/'src'))\nfrom codesign_lab.build import build\np=argparse.ArgumentParser();p.add_argument('design');p.add_argument('--verify',required=True);a=p.parse_args()\nwith tempfile.TemporaryDirectory() as d:\n if (Path(a.design).parent/'composite.json').exists():\n  from codesign_lab.search.composite import reproduce\n  print(json.dumps(reproduce(Path(a.design).parent,Path(a.verify),Path(d))))\n else: print(json.dumps(build(a.design,Path(d)/'out',a.verify)))\n"
     export(ROOT/'data/agent-trace',Path('/root/.codex/state_5.sqlite'),ROOT_THREAD)
-    for path in sorted((ROOT/'data/agent-trace').glob('*')):
-        if not path.is_file() or path.suffix not in ['.jsonl','.json']:continue
-        data=path.read_bytes()
-        # 大型原生会话使用无损 XZ，控制课程 ZIP 的压缩与解压后上限。
-        name='agent-trace/'+path.name
-        files[name+'.xz' if path.suffix=='.jsonl' and len(data)>8*1024**2 else name]=(
-            lzma.compress(data,preset=6) if path.suffix=='.jsonl' and len(data)>8*1024**2 else data)
-    files['agent-trace/README.md']=('课程代理轨迹为完整原生 JSONL。较大的 .jsonl.xz 是无损 XZ；'
-        '可用 xz -dk <文件名> 解压。trace-manifest.json 记录原始字节数与 SHA-256，'
-        'lab verify 会逐份解压核对。\n').encode()
-    if not files['project/iteration-log.md'].strip() or not any(name.startswith('agent-trace/') and (name.endswith('.jsonl') or name.endswith('.jsonl.xz')) for name in files):raise ValueError('Missing manual review records')
+    session_names={item['file'] for item in load(ROOT/'data/agent-trace/trace-manifest.json')['sessions']}
+    traces=sorted(path for path in (ROOT/'data/agent-trace').glob('*.jsonl')
+                  if path.name in session_names)
+    if not files['project/iteration-log.md'].strip() or not traces:
+        raise ValueError('Missing manual review records')
+    # 会话之间有大量重复上下文；无损整组压缩比逐份压缩更适合 25 MiB 限额。
+    with tempfile.TemporaryDirectory() as trace_directory:
+        bundle=Path(trace_directory)/'sessions.tar.xz'
+        with tarfile.open(bundle,'w:xz',preset=9) as archive:
+            for path in traces:archive.add(path,arcname=path.name,recursive=False)
+        add(bundle,'agent-trace/sessions.tar.xz')
+    for path in sorted((ROOT/'data/agent-trace').glob('*.json')):
+        add(path,'agent-trace/'+path.name)
+    for path in sorted((ROOT/'data/agent-trace').glob('*.jsonl')):
+        if path.name not in session_names:
+            add(path,'agent-trace/'+path.name)
+    files['agent-trace/README.md']=('课程代理轨迹完整保存在 sessions.tar.xz；'
+        '可用 tar -xJf sessions.tar.xz 解压。trace-manifest.json 记录每份原始 JSONL 的'
+        '字节数与 SHA-256，lab verify 会逐份核对。\n').encode()
     manifest={'baseline_manifest_sha256':report['baseline_manifest_sha256'],'official_starter_sha256':starter_hash,'local_experimental_score':record['score'],'record_id':identifier,'files_sha256':{name:hashlib.sha256(data).hexdigest() for name,data in files.items()}}
     files['project/package-manifest.json']=(json.dumps(manifest,indent=2)+'\n').encode()
     expanded=sum(map(len,files.values()))
@@ -136,6 +144,49 @@ def package(identifier,output):
         for name,data in sorted(files.items()):archive.writestr(name,data)
     if out.stat().st_size>25*1024**2:raise ValueError('Compressed archive exceeds 25 MiB')
     return {'archive':str(out),'zip_bytes':out.stat().st_size,'expanded_bytes':expanded,'files':len(files),'uploaded':False}
+
+
+def champion_state():
+    """本地可提交冠军指针；只有经过独立解包再生的 ZIP 才算数。"""
+    from pathlib import Path
+    path = ROOT / 'data/submissions/best-local.json'
+    return load(path) if path.is_file() else None
+
+
+def ensure_champion(identifier, *, force=False):
+    """串行打包、校验并原子更新冠军；较弱的异步结果不得覆盖强者。"""
+    import fcntl,os,tempfile
+    from pathlib import Path
+    directory = ROOT / 'data/submissions'
+    directory.mkdir(parents=True, exist_ok=True)
+    record = next(row for row in read() if row['id'] == identifier)
+    if not (record.get('eligible') and record.get('audited') and
+            isinstance(record.get('score'), (int, float))):
+        raise ValueError('只有已审计的合格整案可以成为本地冠军')
+    with (directory / '.best-local.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = champion_state()
+        if not force and current and current.get('record_id') == identifier and \
+                Path(current['archive']).is_file():
+            return current
+        if not force and current and current.get('score', float('-inf')) >= record['score'] and \
+                Path(current.get('archive', '')).is_file():
+            return current
+        with tempfile.TemporaryDirectory(dir=directory) as temporary:
+            draft = Path(temporary) / 'candidate.zip'
+            package(identifier, draft)
+            checked = verify(draft)
+            archive = directory / ('champion-' + identifier + '.zip')
+            os.replace(draft, archive)
+            receipt = {'record_id': identifier, 'score': record['score'],
+                       'archive': str(archive), 'zip_sha256': checked['zip_sha256'],
+                       'zip_bytes': checked['bytes'], 'expanded_bytes': checked['expanded_bytes'],
+                       'files_verified': checked['files_verified'],
+                       'isolated_regeneration': checked['isolated_regeneration']}
+            pointer = Path(temporary) / 'best-local.json'
+            pointer.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n')
+            os.replace(pointer, directory / 'best-local.json')
+            return receipt
 
 def audit(identifier):
     import tempfile
@@ -156,9 +207,8 @@ def audit(identifier):
     if isolated.get('baseline_sha256')!=manifest['baseline_sha256'] or isolated.get('starter_sha256')!=manifest['starter_sha256']:raise ValueError('Isolated toolchain mismatch')
     if report.get('baseline_status')!='frozen' or report.get('baseline_manifest_sha256')!=manifest['baseline_sha256'] or seed_digest(7) not in report.get('seed_sha256',[]):raise ValueError('Frozen baseline/seed mismatch')
     selection_path=resolve_reference(record['candidate'])/'selection.json'
-    composite=selection_path.is_file() and \
-        len({str(Path(load(selection_path)['parents'][case]['source_root']).resolve())
-             for case in ['M1_P1','M2_D1']})>1
+    # 只要是组合候选，就必须按所记录的冻结来源再生；两案同源但并非主源码时亦然。
+    composite=selection_path.is_file()
     with tempfile.TemporaryDirectory(dir=ROOT/'workspace') as directory:
         temporary=Path(directory);config=temporary/'config.json';config.write_text(json.dumps(record['config']))
         if composite:
@@ -166,7 +216,8 @@ def audit(identifier):
             from .search.composite import snapshot,reproduce
             candidate=resolve_reference(record['candidate'])
             proof=verify_pair(candidate,temporary/'pair-proof')
-            if proof['mode']!='mixed_sources':raise ValueError('组合来源身份不一致')
+            if proof['mode'] not in {'mixed_sources', 'single_source'}:
+                raise ValueError('组合来源身份不一致')
             snapshot(candidate,temporary/'snapshot')
             reproduce(temporary/'snapshot',candidate,temporary/'rebuild')
             result={'sha256':proof['artifact_sha256']}
@@ -196,7 +247,7 @@ def unpack(archive: zipfile.ZipFile, destination: Path) -> None:
 
 
 def verify(path: Path) -> dict:
-    import gzip,lzma
+    import gzip,lzma,tarfile,io
     zip_bytes = path.stat().st_size
     if not 0 < zip_bytes <= 25 * 1024**2:
         raise ValueError('ZIP must be nonempty and at most 25 MiB')
@@ -227,11 +278,24 @@ def verify(path: Path) -> dict:
             if hashlib.sha256(archive.read(name)).hexdigest() != expected:
                 raise ValueError(f"Package hash mismatch: {name}")
         trace_manifest = json.loads(archive.read('agent-trace/trace-manifest.json'))
+        bundled={}
+        if 'agent-trace/sessions.tar.xz' in recorded:
+            with tarfile.open(fileobj=io.BytesIO(archive.read('agent-trace/sessions.tar.xz')),
+                              mode='r:xz') as bundle:
+                for member in bundle:
+                    if not member.isfile() or '/' in member.name or member.name in bundled:
+                        raise ValueError('代理轨迹压缩包包含非法成员')
+                    bundled[member.name]=bundle.extractfile(member).read()
+        expected_sessions={session['file'] for session in trace_manifest['sessions']}
+        if bundled and set(bundled)!=expected_sessions:
+            raise ValueError('代理轨迹压缩包成员与清单不一致')
         for session in trace_manifest['sessions']:
             plain = 'agent-trace/' + session['file']
             compressed = plain + '.gz'
             xz = plain + '.xz'
-            if plain in recorded:
+            if session['file'] in bundled:
+                original = bundled[session['file']]
+            elif plain in recorded:
                 original = archive.read(plain)
             elif xz in recorded:
                 original = lzma.decompress(archive.read(xz))

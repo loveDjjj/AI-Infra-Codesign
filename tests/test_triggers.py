@@ -11,24 +11,24 @@ class TriggerChecks(unittest.TestCase):
         triggers.acknowledge('global', request['decision_id'], now=100)
         self.assertEqual(triggers.poll({}, 0, now=300, review_exhaustion=True), [])
 
-    def test_each_new_result_requests_analysis_and_keeps_one_session_lane(self):
+    def test_official_result_requests_analysis_and_keeps_one_session_lane(self):
         state = {};triggers = Triggers(state, global_only=True, batch_size=8, cooldown=120)
         targets = {'t': {'definition': {'lane': 'p1_w2'}, 'status': 'ACTIVE'}}
         triggers.lane('global')['session_id'] = 'existing-session'
         triggers.observe('p1_w2', {'id': 'case-1', 'observation_kind': 'case_result',
             'case': 'M1_P1', 'cycles': 394545})
-        first = triggers.poll(targets, 20, now=100)[0]
-        self.assertEqual(first['lane'], 'global')
-        self.assertIn('result_ready', first['reasons'])
-        triggers.acknowledge('global', first['decision_id'], now=100)
+        self.assertEqual(triggers.poll(targets, 20, now=100), [])
         triggers.observe('global', {'id': 'official-1', 'observation_kind': 'official_result',
             'record_id': 'full-1', 'score': 49420, 'audited': True})
-        second = triggers.poll(targets, 20, now=101)[0]
-        self.assertEqual(second['observation_ids'], ['official-1'])
+        first = triggers.poll(targets, 20, now=101)[0]
+        self.assertEqual(first['lane'], 'global')
+        self.assertIn('result_ready', first['reasons'])
+        self.assertEqual(first['observation_ids'], ['case-1', 'official-1'])
+        triggers.acknowledge('global', first['decision_id'], now=101)
         self.assertEqual(triggers.lane('global')['session_id'], 'existing-session')
 
     def test_concurrent_results_are_coalesced(self):
-        state = {};triggers = Triggers(state, global_only=True, batch_size=8)
+        state = {};triggers = Triggers(state, global_only=True, batch_size=3)
         targets = {'t': {'definition': {'lane': 'p1_w2'}, 'status': 'ACTIVE'}}
         for index in range(3):
             triggers.observe('global', {'id': f'case-{index}', 'observation_kind': 'case_result'})
@@ -40,7 +40,7 @@ class TriggerChecks(unittest.TestCase):
         state = {};triggers = Triggers(state, global_only=True, batch_size=8, low_watermark=2)
         targets = {'t': {'definition': {'lane': 'p1_w2'}, 'status': 'ACTIVE'}}
         triggers.observe('global', {'id': 'implementation-p1', 'observation_kind': 'implementation',
-            'proposal_status': 'REJECTED', 'case': 'M1_P1'})
+            'proposal_status': 'RESEARCH_PAUSED', 'case': 'M1_P1', 'case_gain': .02})
         request = triggers.poll(targets, 20, now=100)[0]
         self.assertIn('implementation_result', request['reasons'])
         self.assertEqual(request['observation_ids'], ['implementation-p1'])

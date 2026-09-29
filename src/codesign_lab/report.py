@@ -136,6 +136,8 @@ def live_snapshot():
         points.append({'id':row['id'],'score':best_score,'p1_cycles':best_p1,
                        'd1_cycles':best_d1,'timestamp':row.get('timestamp')})
     cases=best.get('cases',{}) if best else {}
+    from .release import champion_state
+    champion=champion_state()
     def metric(case,name):
         return cases.get(case,{}).get('timing',{}).get(name)
     return {'updated_at':datetime.now(timezone.utc).isoformat(),
@@ -144,6 +146,7 @@ def live_snapshot():
                 'p1_power_w':metric('M1_P1','peak_window_power_w'),
                 'd1_power_w':metric('M2_D1','peak_window_power_w')} if best else None,
         'promoted_record':state().get('promoted_record'),
+        'best_submittable':champion,
         'trend':points,'tasks':_active_tasks(),'ai':_latest_ai(),
         'supply':_supply_status()}
 
@@ -157,11 +160,14 @@ def generate():
     cases=best.get('cases',{}) if best else {}
     tasks=_active_tasks()
     pointer=state()
+    from .release import champion_state
+    champion=champion_state()
     now=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     cards=[('最高已审计分数',_number(best['score']) if best else '—'),
            ('P1 周期',_number(cases.get('M1_P1',{}).get('timing',{}).get('cycles'),0)),
            ('D1 周期',_number(cases.get('M2_D1',{}).get('timing',{}).get('cycles'),0)),
-           ('当前运行任务',str(len(tasks)))]
+           ('当前运行任务',str(len(tasks))),
+           ('可提交冠军',_number(champion['score']) if champion else '—')]
     card_html=''.join(f'<div class="card"><span>{_text(label)}</span><strong>{_text(value)}</strong></div>'
                       for label,value in cards)
     graphs=''.join([
@@ -189,7 +195,7 @@ th,td{{padding:10px;text-align:left;border-bottom:1px solid #344961;word-break:b
 .scroll{{overflow-x:auto}}</style></head><body>
 <h1>AI Infra · 精简看板</h1><p class="muted">生成于 {now}；页面每 30 秒重新读取。完整事实仍以实验账本和官方报告为准。</p>
 <div class="cards">{card_html}</div>
-<section><h2>当前最佳</h2><p>{best_name}</p><p>已晋升版本：{_text(pointer.get('promoted_record'))}。趋势仅使用已审计合格整案，单案最快值不代表可直接组合的整案成绩。</p></section>
+<section><h2>当前最佳</h2><p>{best_name}</p><p>已晋升版本：{_text(pointer.get('promoted_record'))}。可提交 ZIP：{_text(champion.get('archive') if champion else None)}。趋势仅使用已审计合格整案，单案最快值不代表可直接组合的整案成绩。</p></section>
 <div class="graphs">{graphs}</div>
 <section><h2>正在运行的任务</h2><div class="scroll"><table><thead><tr><th>批次</th><th>阶段</th><th>任务</th><th>运行时间</th><th>峰值 RSS</th></tr></thead><tbody>{task_rows}</tbody></table></div></section>
 <section><h2>最新 AI 整理</h2>{ai_html}</section>
