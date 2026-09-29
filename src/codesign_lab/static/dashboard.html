@@ -17,7 +17,7 @@
 <body>
   <main class="wrap">
     <header class="top"><div><div class="eyebrow">AI INFRA CODESIGN</div><h1>实时优化看板</h1><p class="sub">只展示最佳结果、关键趋势和当前任务。每 5 秒更新一次。</p></div><div class="status" id="connection"><span class="dot"></span><span id="connectionText">连接中</span></div></header>
-    <section class="cards" aria-label="关键指标"><div class="card"><div class="label">最高已审计分数</div><div class="value" id="score">—</div></div><div class="card"><div class="label">P1 周期</div><div class="value" id="p1">—</div></div><div class="card"><div class="label">D1 周期</div><div class="value" id="d1">—</div></div><div class="card"><div class="label">运行中任务</div><div class="value" id="active">—</div></div></section>
+    <section class="cards" aria-label="关键指标"><div class="card"><div class="label">最高已审计分数</div><div class="value" id="score">—</div></div><div class="card"><div class="label">可提交冠军</div><div class="value" id="submittable">—</div></div><div class="card"><div class="label">P1 周期</div><div class="value" id="p1">—</div></div><div class="card"><div class="label">D1 周期</div><div class="value" id="d1">—</div></div><div class="card"><div class="label">运行中任务</div><div class="value" id="active">—</div></div></section>
     <div class="layout">
       <section class="panel"><div class="panel-header"><div><h2>最佳分数走势</h2><p class="hint">仅使用通过官方审计的完整整案</p></div><span class="tag">官方结果</span></div><svg class="chart" id="scoreChart" viewBox="0 0 800 220" role="img" aria-label="最佳分数走势图"></svg><div class="axis"><span>较早</span><span>最新</span></div><div class="meta" id="bestId">等待数据</div></section>
       <div class="stack"><section class="panel"><div class="panel-header"><div><h2>P1 最少周期</h2><p class="hint">合格整案中的累计最少值</p></div></div><svg class="chart small" id="p1Chart" viewBox="0 0 800 160" role="img" aria-label="P1 周期走势图"></svg></section><section class="panel"><div class="panel-header"><div><h2>D1 最少周期</h2><p class="hint">合格整案中的累计最少值</p></div></div><svg class="chart small" id="d1Chart" viewBox="0 0 800 160" role="img" aria-label="D1 周期走势图"></svg></section></div>
@@ -42,7 +42,7 @@
       const label=document.createElementNS(svgNS,'text');label.setAttribute('x',String(right));label.setAttribute('y',String(Math.max(17,xy(values.at(-1),values.length-1)[1]-12)));label.setAttribute('text-anchor','end');label.setAttribute('fill',color);label.setAttribute('font-size','17');label.setAttribute('font-weight','700');label.textContent=fmt(values.at(-1),field==='score'?2:0);svg.append(label);
     }
     function render(data){
-      const best=data.best||{};$('score').textContent=fmt(best.score,2);$('p1').textContent=fmt(best.p1_cycles);$('d1').textContent=fmt(best.d1_cycles);
+      const best=data.best||{};$('score').textContent=fmt(best.score,2);$('submittable').textContent=fmt(data.best_submittable?.score,2);$('p1').textContent=fmt(best.p1_cycles);$('d1').textContent=fmt(best.d1_cycles);
       $('active').textContent=fmt(data.tasks.length);$('taskCount').textContent=data.tasks.length+' 个任务';$('bestId').textContent='当前最佳：'+(best.id||'尚无已审计整案')+' · 已晋升：'+(data.promoted_record||'未设置');
       chart('scoreChart',data.trend,'score','#64e4bb',220);chart('p1Chart',data.trend,'p1_cycles','#70bfff',160);chart('d1Chart',data.trend,'d1_cycles','#ffc47d',160);
       const tbody=$('tasks');tbody.replaceChildren();
