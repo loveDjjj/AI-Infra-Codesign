@@ -288,6 +288,71 @@ class ImplementationChecks(unittest.TestCase):
             self.assertEqual(result['rejection_kind'], 'static_refutation')
             regression.assert_not_called()
 
+    def test_evidence_resume_consumes_static_stop_before_requiring_source_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign = root / 'workspace/pipeline/current'
+            campaign.mkdir(parents=True)
+            (campaign / 'state.json').write_text(json.dumps({'analysis': {'lanes': {
+                'global': {'session_id': str(uuid.uuid4())}}}}))
+            snapshot = root / 'workspace/implementation-loop/current/joint/source'
+            snapshot.mkdir(parents=True)
+            release = snapshot / 'data/releases/parent/local-grade.json'
+            release.parent.mkdir(parents=True)
+            release.write_text('{}')
+            for name in module.ARTIFACTS:
+                path = snapshot / 'workspace/implementation-builds/baseline' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('baseline')
+            item = {'id': 'joint', 'case': 'both', 'lane': 'hardware',
+                    'transformation_id': 'vec16-native', 'proposal': '原生布局'}
+            state_path = snapshot.parent / 'state.json'
+            state_path.write_text(json.dumps({'status': 'EVIDENCE_READY',
+                'proposal': item, 'baseline_id': 'parent', 'snapshot': str(snapshot),
+                'coder_session_id': 'same-session', 'evidence': {'trace': 'matched'}}))
+            baseline = {'id': 'parent', 'candidate': 'data/releases/parent',
+                        'reproduction': 'verified',
+                        'config': {'hardware': {}, 'programs': {}}}
+            def coding(destination, *_args, **kwargs):
+                self.assertEqual(kwargs['resume_session'], 'same-session')
+                stop = destination / 'workspace/implementation-input/stop.json'
+                stop.parent.mkdir(parents=True, exist_ok=True)
+                stop.write_text(json.dumps({'schema_version': 1,
+                    'mechanism_id': 'vec16-native',
+                    'reason': '数值化静态成本显示该具体缩块模板的计算服务同时恶化',
+                    'evidence': ['热点 TC 和 RF 的官方服务公式结果均高于父版']}))
+                return {'coder_session_id': 'same-session'}
+            with patch.object(module, 'ROOT', root), \
+                 patch.object(module, 'campaign_generator_unchanged', return_value=True), \
+                 patch.object(module, 'verify_official'), \
+                 patch.object(module, 'read', return_value=[baseline]), \
+                 patch.object(module, 'coding_turn', side_effect=coding), \
+                 patch.object(module, 'validate_diff') as validate:
+                result = module.ImplementationLoop(campaign).process(item, phase='code')
+            self.assertEqual(result['status'], 'REJECTED', result.get('error'))
+            self.assertEqual(result['rejection_kind'], 'static_refutation')
+            validate.assert_not_called()
+
+    def test_joint_evidence_request_uses_one_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            control = snapshot / 'workspace/implementation-input'
+            control.mkdir(parents=True)
+            need = {'schema_version': 1, 'record_id': 'parent', 'case': 'M1_P1',
+                    'question': '请补齐与父版逐字节匹配的单案事件证据及算子映射',
+                    'required_artifacts': ['matching_trace', 'operator_map']}
+            path = control / 'needs-evidence.json'
+            path.write_text(json.dumps(need))
+            saved = []
+            module.consume_coder_control(snapshot, {'case': 'both'}, {'id': 'parent'}, {},
+                                         lambda status, **fields: saved.append((status, fields)))
+            self.assertEqual(saved[0][0], 'NEEDS_EVIDENCE')
+            need['case'] = 'both'
+            path.write_text(json.dumps(need))
+            with self.assertRaisesRegex(ValueError, '缺证据请求格式'):
+                module.consume_coder_control(snapshot, {'case': 'both'}, {'id': 'parent'}, {},
+                                             lambda *_args, **_kwargs: None)
+
     def test_same_proposal_cannot_run_from_worker_and_manual_cli_together(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

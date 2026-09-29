@@ -538,6 +538,49 @@ def changed_files(snapshot: Path):
     return [line[3:] for line in result.stdout.splitlines()]
 
 
+def consume_coder_control(snapshot: Path, item: dict, baseline: dict,
+                          generator_hashes: dict, save):
+    """编码及证据恢复回合共用缺证据、静态停止交付分流。"""
+    control = snapshot / 'workspace/implementation-input'
+    need_path = control / 'needs-evidence.json'
+    stop_path = control / 'stop.json'
+    if need_path.is_file() and stop_path.is_file():
+        raise ValueError('编码回合不能同时请求证据和静态停止')
+    if not need_path.is_file() and not stop_path.is_file():
+        return False
+    changed_generator = {str(p.relative_to(snapshot)): digest(p)
+                         for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
+    if changed_generator != generator_hashes:
+        raise ValueError('证据请求或静态停止不能携带未经验证的生成器改动')
+    if need_path.is_file():
+        need = load(need_path)
+        case_ok = (need.get('case') in CASES.values() if item['case'] == 'both'
+                   else need.get('case') == item['case']) if isinstance(need, dict) else False
+        if not isinstance(need, dict) or set(need) != {
+                'schema_version', 'record_id', 'case', 'question',
+                'required_artifacts'} or need['schema_version'] != 1 or \
+                need['record_id'] != baseline['id'] or not case_ok or \
+                not isinstance(need['question'], str) or \
+                not 20 <= len(need['question']) <= 1000 or \
+                need['required_artifacts'] != ['matching_trace', 'operator_map']:
+            raise ValueError('缺证据请求格式或父版身份无效')
+        save('NEEDS_EVIDENCE', evidence_request=need)
+        return True
+    stop = load(stop_path)
+    if not isinstance(stop, dict) or set(stop) != {
+            'schema_version', 'mechanism_id', 'reason', 'evidence'} or \
+            stop['schema_version'] != 1 or \
+            stop['mechanism_id'] != item.get('transformation_id') or \
+            not isinstance(stop['reason'], str) or not 20 <= len(stop['reason']) <= 2000 or \
+            not isinstance(stop['evidence'], list) or not 1 <= len(stop['evidence']) <= 16 or \
+            any(not isinstance(value, str) or not 10 <= len(value) <= 1000
+                for value in stop['evidence']):
+        raise ValueError('静态否证文件格式或机制身份无效')
+    save('REJECTED', reason=stop['reason'], static_evidence=stop['evidence'],
+         rejection_kind='static_refutation')
+    return True
+
+
 def validate_diff(snapshot: Path):
     changed = changed_files(snapshot)
     if not changed:
@@ -618,6 +661,7 @@ def coding_turn(snapshot: Path, campaign: Path, session_id: str, item: dict,
             '这些由统一 worker 在代码交付后执行。若仅缺少与父版严格匹配的事件证据，'
             '不要把机制写成静态否证；在 workspace/implementation-input/needs-evidence.json '
             '写入 schema_version=1、record_id=父版记录ID、case=受影响案例、'
+            '联合硬件任务每次只能请求 M1_P1 或 M2_D1 一个案例，不能填 both；'
             'question=具体待回答问题、required_artifacts=["matching_trace","operator_map"]。'
             '控制器将准备证据后恢复同一编码会话。若静态资源账已否证机制，'
             '不修改生成器也不伪造 config.json，而在 '
@@ -1267,55 +1311,22 @@ class ImplementationLoop:
                         digest(snapshot / 'data/experiments.jsonl') != ledger_hash or \
                         digest(snapshot / 'data/releases' / source_release / 'local-grade.json') != release_report_hash:
                     raise ValueError('编码回合修改了冻结依据或实验账本')
-                need_path = snapshot / 'workspace/implementation-input/needs-evidence.json'
-                if need_path.is_file():
-                    need = load(need_path)
-                    if not isinstance(need, dict) or set(need) != {
-                            'schema_version', 'record_id', 'case', 'question',
-                            'required_artifacts'} or need['schema_version'] != 1 or \
-                            need['record_id'] != baseline['id'] or \
-                            need['case'] != item['case'] or item['case'] == 'both' or \
-                            not isinstance(need['question'], str) or \
-                            not 20 <= len(need['question']) <= 1000 or \
-                            need['required_artifacts'] != ['matching_trace', 'operator_map']:
-                        raise ValueError('缺证据请求格式或父版身份无效')
-                    changed_generator = {str(p.relative_to(snapshot)): digest(p)
-                        for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
-                    if changed_generator != snapshot_generator_hashes:
-                        raise ValueError('缺证据请求不能携带未经验证的生成器改动')
-                    save('NEEDS_EVIDENCE', evidence_request=need)
-                    return state
-                stop_path = snapshot / 'workspace/implementation-input/stop.json'
-                if stop_path.is_file():
-                    stop = load(stop_path)
-                    if not isinstance(stop, dict) or set(stop) != {
-                            'schema_version', 'mechanism_id', 'reason', 'evidence'} or \
-                            stop['schema_version'] != 1 or \
-                            stop['mechanism_id'] != item.get('transformation_id') or \
-                            not isinstance(stop['reason'], str) or not 20 <= len(stop['reason']) <= 2000 or \
-                            not isinstance(stop['evidence'], list) or not 1 <= len(stop['evidence']) <= 16 or \
-                            any(not isinstance(value, str) or not 10 <= len(value) <= 1000
-                                for value in stop['evidence']):
-                        raise ValueError('静态否证文件格式或机制身份无效')
-                    changed_generator = {str(p.relative_to(snapshot)): digest(p)
-                                         for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
-                    if changed_generator != snapshot_generator_hashes:
-                        raise ValueError('静态否证不能携带未经验证的生成器改动')
-                    save('REJECTED', reason=stop['reason'], static_evidence=stop['evidence'],
-                         rejection_kind='static_refutation')
+            elif state['status'] == 'EVIDENCE_READY':
+                snapshot_generator_hashes = {str(p.relative_to(snapshot)): digest(p)
+                    for p in (snapshot / 'src/codesign_lab/codegen').rglob('*.py')}
+                (snapshot / 'workspace/implementation-input/needs-evidence.json').unlink(missing_ok=True)
+                coding = coding_turn(snapshot, self.campaign, session_id, item, baseline,
+                    self.code_timeout, self.model, self.effort,
+                    resume_session=state['coder_session_id'], evidence=state['evidence'])
+                save('EVIDENCE_READY', coder_session_id=coding['coder_session_id'])
+            if state['status'] in {'CODING', 'EVIDENCE_READY'}:
+                if consume_coder_control(snapshot, item, baseline,
+                                         snapshot_generator_hashes, save):
                     return state
                 save('CODED')
                 if phase == 'code':
                     return state
-            elif state['status'] == 'EVIDENCE_READY':
-                coding = coding_turn(snapshot, self.campaign, session_id, item, baseline,
-                    self.code_timeout, self.model, self.effort,
-                    resume_session=state['coder_session_id'], evidence=state['evidence'])
-                (snapshot / 'workspace/implementation-input/needs-evidence.json').unlink(missing_ok=True)
-                save('CODED', coder_session_id=coding['coder_session_id'])
-                if phase == 'code':
-                    return state
-            elif not all((baseline_build / name).is_file() for name in ARTIFACTS):
+            if not all((baseline_build / name).is_file() for name in ARTIFACTS):
                 # 旧控制器把输出放在 workspace 根目录，恢复时重建到稳定的子目录。
                 run(snapshot, [interpreter(), '-m', 'codesign_lab.cli', 'build', str(base_config),
                     '--out', str(baseline_build), '--verify',
